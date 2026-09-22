@@ -23,6 +23,9 @@ import { ExportPanel } from "./workbench/ExportPanel";
 import { EpisodeParams } from "./workbench/EpisodeParams";
 import { EpisodeTable } from "./workbench/EpisodeTable";
 import { EpisodeExportBar } from "./workbench/EpisodeExportBar";
+import { EpisodeParams } from "./workbench/EpisodeParams";
+import { EpisodeTable } from "./workbench/EpisodeTable";
+import { EpisodeExportBar } from "./workbench/EpisodeExportBar";
 import { TranscribeView } from "./TranscribeView";
 import { ExportView } from "./ExportView";
 import { ClipReviewModal } from "./ClipReviewModal";
@@ -122,6 +125,7 @@ function LeftRail({ onOpenWatch }: { onOpenWatch: () => void }): React.JSX.Eleme
 /** 检测阶段的信号统计行(检测完成后展示在候选页签头)。 */
 function StatsLine(): React.JSX.Element | null {
   const th = useT("highlights");
+  const te = useT("episode");
   const te = useT("episode");
   const { stats } = useSession();
   const bits: Array<{ key: string; cls: string; text: string }> = [];
@@ -411,6 +415,21 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
                 </div>
               ) : (
               <>
+              {/* 模式切换 */}
+              <div className="mb-2 flex shrink-0 items-center gap-1">
+                {([["clip", te("modeClip")], ["episode", te("modeEpisode")]] as const).map(([key, label]) => (
+                  <button key={key} type="button" onClick={() => session.setWorkMode(key)}
+                    className={`rounded-lg px-3 py-1.5 text-[11.5px] font-bold transition-colors ${session.workMode === key ? "bg-ember/12 text-ember" : "text-mut hover:text-fg"}`}
+                  >{label}</button>
+                ))}
+              </div>
+
+              {session.workMode === "episode" ? (
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <EpisodeParams />
+                  <EpisodeTable />
+                </div>
+              ) : (<>
               {/* 候选 / 逐句稿 页签 */}
               <div className="flex shrink-0 items-center gap-1.5">
                 {(
@@ -532,6 +551,7 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
               )}
             </>
           )}
+          </>)}
         </div>
 
         </>
