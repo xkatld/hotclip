@@ -65,8 +65,8 @@ export async function detectEpisodes(
     const raw = await chatEpisodeDetect(llm, system, user, signal);
     const breaks = parseBreaks(raw);
     return smartSplit(transcript, breaks, config);
-  } catch {
-    // LLM 失败,回退等时
-    return fixedSplit(transcript, config);
+  } catch (err) {
+    // 把 LLM 错误往上抛,让 UI 层决定是否回退
+    throw new Error(`智能分集失败: ${err instanceof Error ? err.message : String(err)}`);
   }
 }

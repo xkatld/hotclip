@@ -16,7 +16,7 @@ const NUMBER_FORMATS: EpisodeNumberFormat[] = ["P{n}", "第{n}集", "{n}", "{nn}
 
 export function EpisodeParams(): React.JSX.Element {
   const t = useT("episode");
-  const { transcript, episodeDetecting, setEpisodes, setEpisodeDetecting } = useSession();
+  const { transcript, episodeDetecting, setEpisodes, setEpisodeDetecting, setEpisodeSelected } = useSession();
   const { config: llmConfig } = useLlmStore();
 
   const [mode, setMode] = useState<EpisodeMode>("smart");
@@ -29,9 +29,12 @@ export function EpisodeParams(): React.JSX.Element {
 
   const canStart = !!transcript && !episodeDetecting;
 
+  const [error, setError] = useState<string | null>(null);
+
   const start = async (): Promise<void> => {
     if (!transcript) return;
     setEpisodeDetecting(true);
+    setError(null);
     try {
       const cfg = {
         ...EPISODE_SPLIT_DEFAULTS,
@@ -43,10 +46,32 @@ export function EpisodeParams(): React.JSX.Element {
         numberFormat: numFmt,
         srtFile,
       };
-      const result = await getApi().episodeDetect({ transcript, llm: llmConfig, config: cfg });
-      setEpisodes(result);
+
+      let episodes: import("../../../../shared/api-types").EpisodeCandidate[];
+
+      if (mode === "smart") {
+        // 智能模式: LLM 识别断点 → 分集 → AI 生成标题
+        episodes = await getApi().episodeDetect({ transcript, llm: llmConfig, config: cfg });
+        // LLM 生成每集标题(失败不阻塞——用默认标题)
+        try {
+          episodes = await getApi().episodeTitles({ transcript, episodes, config: cfg, llm: llmConfig });
+        } catch { /* title generation is optional */ }
+      } else if (mode === "fixed") {
+        episodes = await getApi().episodeSplitFixed({ transcript, config: cfg });
+      } else {
+        // manual: 暂用空断点(后续支持用户交互添加)
+        episodes = [];
+      }
+
+      setEpisodes(episodes);
+      // 自动全选
+      if (episodes.length > 0) {
+        setEpisodeSelected(new Set(episodes.map((ep) => ep.id)));
+      }
     } catch (e) {
-      console.error("Episode detect failed:", e);
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("Episode detect failed:", msg);
+      setError(msg);
     } finally {
       setEpisodeDetecting(false);
     }
@@ -128,6 +153,13 @@ export function EpisodeParams(): React.JSX.Element {
 
       {/* 导出选项 */}
       <SwitchRow label={t("optSrt")} on={srtFile} onToggle={() => setSrtFile(!srtFile)} />
+
+      {/* 错误提示 */}
+      {error && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-400">
+          {error}
+        </div>
+      )}
 
       {/* 开始按钮 */}
       <button
