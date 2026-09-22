@@ -377,7 +377,7 @@ export const en = {
     boundarySegment: "Cut: sentence-aligned",
     boundarySignal: "Cut: from audio/visual signals",
     llmTitle: "Connect an AI model",
-    llmDesc: "Highlight detection needs an LLM. Atlas Cloud is recommended — one key covers major Western and Chinese models; local Ollama or any OpenAI-compatible endpoint works too.",
+    llmDesc: "Highlight detection needs an LLM. Use local Ollama or any OpenAI-compatible endpoint (DeepSeek / DashScope / SiliconFlow etc. — just fill in the Base URL).",
     llmPreset: "Provider",
     llmOllamaHint: "The local option needs Ollama installed and running (ollama.com) with the model pulled via ollama pull — no Ollama? Pick any cloud provider above and paste an API key.",
     preflightChecking: "Checking connection…",

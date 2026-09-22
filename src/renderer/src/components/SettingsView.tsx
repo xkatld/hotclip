@@ -36,7 +36,7 @@ import {
 import { useT, useLocaleStore } from "../i18n/store";
 import { LOCALE_LIST, REGISTRY } from "../i18n/messages";
 import { getApi, isElectron } from "../api/provider";
-import { useLlmStore, LLM_PRESET_LIST, LLM_PRESETS, presetForBaseUrl } from "../stores/llm-store";
+import { useLlmStore, LLM_PRESET_LIST, presetForBaseUrl } from "../stores/llm-store";
 import { useAsrStore } from "../stores/asr-store";
 import { useRenderPrefs } from "../stores/render-prefs-store";
 import { useSession } from "../stores/session-store";
@@ -447,7 +447,6 @@ function AiSection(): React.JSX.Element {
   const [modelList, setModelList] = useState<string[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const [modelError, setModelError] = useState("");
-  const [checking, setChecking] = useState(false);
   const [verdict, setVerdict] = useState<PreflightVerdict | null>(null);
 
   useEffect(() => {
@@ -461,14 +460,7 @@ function AiSection(): React.JSX.Element {
     setModelList(res.ids);
     setModelError(res.error ?? "");
     setModelLoading(false);
-  }, [config.baseUrl, config.apiKey]);
-
-  // 连接自检:必败配置(Ollama 没跑/Key 错/模型没拉)当场给指引(issue #6)
-  const check = useCallback(async (): Promise<void> => {
-    setChecking(true);
-    const res = await getApi().listLlmModels(config.baseUrl, config.apiKey ?? "");
-    setChecking(false);
-    if (res.ids.length > 0) setModelList(res.ids);
+    // 拉取同时做连接自检:必败配置当场给指引
     setVerdict(preflightVerdict(res, config.baseUrl, config.model));
   }, [config]);
 
@@ -573,9 +565,9 @@ function AiSection(): React.JSX.Element {
             {t("llmModelsFound", { n: modelList.length })}
           </p>
         )}
-        <div className="mt-4 flex items-center justify-between">
+        <div className="mt-4">
           <a
-            href={presetForBaseUrl(config.baseUrl)?.keyUrl || LLM_PRESETS.atlas.keyUrl}
+            href={presetForBaseUrl(config.baseUrl)?.keyUrl || LLM_PRESET_LIST[0].keyUrl}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-1 text-[12px] text-ember hover:underline"
@@ -583,14 +575,6 @@ function AiSection(): React.JSX.Element {
             {t("llmGetKey")}
             <LuExternalLink className="h-3 w-3" />
           </a>
-          <button
-            type="button"
-            disabled={checking || !config.baseUrl}
-            onClick={() => void check()}
-            className="rounded-lg border border-line px-4 py-2 text-[12.5px] font-semibold text-mut transition-colors hover:border-mut hover:text-fg disabled:opacity-40"
-          >
-            {checking ? t("preflightChecking") : t("llmModelsFetch")}
-          </button>
         </div>
       </div>
 

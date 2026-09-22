@@ -23,12 +23,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest # arm64 dmg
-            args: --mac dmg
+          # --- macOS 和 Linux 暂时禁用,只构建 Windows ---
+          # - os: macos-latest # arm64 dmg
+          #   args: --mac dmg
           - os: windows-latest # nsis installer + portable zip (绿色版)
             args: --win
-          - os: ubuntu-latest # experimental AppImage (issue #7)
-            args: --linux
+          # - os: ubuntu-latest # experimental AppImage (issue #7)
+          #   args: --linux
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -61,10 +62,10 @@ jobs:
         with:
           name: installers-${{ matrix.os }}
           path: |
-            dist/*.dmg
+            # dist/*.dmg          # macOS 暂停
             dist/*.exe
             dist/*.zip
-            dist/*.AppImage
+            # dist/*.AppImage     # Linux 暂停
             dist/*.blockmap
             dist/latest*.yml
           if-no-files-found: error
@@ -96,15 +97,15 @@ jobs:
           fi
 
           required_patterns=(
-            "assets/*.dmg"
-            "assets/*.dmg.blockmap"
+            # "assets/*.dmg"            # macOS 暂停
+            # "assets/*.dmg.blockmap"    # macOS 暂停
             "assets/*.exe"
             "assets/*.exe.blockmap"
             "assets/*.zip"
-            "assets/*.AppImage"
+            # "assets/*.AppImage"        # Linux 暂停
             "assets/latest.yml"
-            "assets/latest-mac.yml"
-            "assets/latest-linux.yml"
+            # "assets/latest-mac.yml"    # macOS 暂停
+            # "assets/latest-linux.yml"  # Linux 暂停
           )
 
           for pattern in "${required_patterns[@]}"; do
