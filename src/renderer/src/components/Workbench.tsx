@@ -529,7 +529,7 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
         <ExportBar defaultOutDir={defaultOutDir} onExport={startExport} onOpenPanel={() => setShowExportPanel(true)} />
       )}
       {transcript && session.workMode === "episode" && session.episodes && session.episodes.length > 0 && (
-        <EpisodeExportBar onExport={() => {}} />
+        <EpisodeExportBar />
       )}
 
       {/* ---- 导出进行中:中央覆盖层(候选保留在 store,出完直接回来) ---- */}

@@ -4,6 +4,10 @@
 import { LuScissors } from "react-icons/lu";
 import { useT } from "../../i18n/store";
 import { useSession } from "../../stores/session-store";
+import { useRenderPrefs } from "../../stores/render-prefs-store";
+import { useLlmStore } from "../../stores/llm-store";
+import { getApi } from "../../api/provider";
+import { EPISODE_SPLIT_DEFAULTS } from "../../../../shared/api-types";
 
 function formatDuration(sec: number): string {
   const h = Math.floor(sec / 3600);
@@ -12,12 +16,31 @@ function formatDuration(sec: number): string {
   return `${m}:00`;
 }
 
-export function EpisodeExportBar({ onExport }: { onExport: () => void }): React.JSX.Element {
+export function EpisodeExportBar(): React.JSX.Element {
   const t = useT("episode");
-  const { episodes, episodeSelected, episodeExporting } = useSession();
+  const { file, transcript, episodes, episodeSelected, episodeExporting, setEpisodeExporting } = useSession();
   const all = episodes ?? [];
   const picked = all.filter((e) => episodeSelected.has(e.id));
   const totalSec = picked.reduce((a, e) => a + e.durationSec, 0);
+
+  const handleExport = async (): Promise<void> => {
+    if (!file || !transcript || picked.length === 0) return;
+    setEpisodeExporting(true);
+    try {
+      const outDir = await getApi().defaultOutDir();
+      await getApi().episodeExport({
+        inputPath: file.path,
+        episodes: picked,
+        transcript,
+        outDir: `${outDir}/episodes`,
+        config: EPISODE_SPLIT_DEFAULTS,
+      });
+    } catch (e) {
+      console.error("Episode export failed:", e);
+    } finally {
+      setEpisodeExporting(false);
+    }
+  };
 
   return (
     <div className="flex h-12 shrink-0 items-center gap-3 border-t border-line/70 bg-panel/70 px-4 backdrop-blur">
@@ -28,7 +51,7 @@ export function EpisodeExportBar({ onExport }: { onExport: () => void }): React.
       <button
         type="button"
         disabled={picked.length === 0 || episodeExporting}
-        onClick={onExport}
+        onClick={() => void handleExport()}
         className="btn-flame flex h-8.5 shrink-0 items-center gap-1.5 rounded-lg px-5 text-[13px] font-extrabold whitespace-nowrap text-white disabled:opacity-40"
       >
         <LuScissors className="h-4 w-4" />
