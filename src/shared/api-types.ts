@@ -929,7 +929,7 @@ export interface HotClipApi {
   /** 显式预下载缺失的默认管线模型;支持断点续传。 */
   diagnosticsPrepareModels: (llm: LlmConfig | null, locale?: "zh" | "en") => Promise<DiagnosticsReport>;
   // ── 长视频分集 ──
-  episodeDetect: (args: { transcript: Transcript; llm: LlmConfig; config: EpisodeSplitConfig }) => Promise<EpisodeCandidate[]>;
+  episodeDetect: (args: { transcript: Transcript; llm: LlmConfig; config: EpisodeSplitConfig }) => Promise<{ episodes: EpisodeCandidate[]; fallbackReason?: string }>;
   episodeTitles: (args: { transcript: Transcript; episodes: EpisodeCandidate[]; config: EpisodeSplitConfig; llm?: LlmConfig }) => Promise<EpisodeCandidate[]>;
   episodeSplitFixed: (args: { transcript: Transcript; config: EpisodeSplitConfig }) => Promise<EpisodeCandidate[]>;
   episodeSplitManual: (args: { transcript: Transcript; breakpoints: number[] }) => Promise<EpisodeCandidate[]>;
