@@ -928,6 +928,13 @@ export interface HotClipApi {
   diagnosticsClearEvidenceIndex: (llm: LlmConfig | null, locale?: "zh" | "en") => Promise<DiagnosticsReport>;
   /** 显式预下载缺失的默认管线模型;支持断点续传。 */
   diagnosticsPrepareModels: (llm: LlmConfig | null, locale?: "zh" | "en") => Promise<DiagnosticsReport>;
+  // ── 长视频分集 ──
+  episodeDetect: (args: { transcript: Transcript; llm: LlmConfig; config: EpisodeSplitConfig }) => Promise<EpisodeCandidate[]>;
+  episodeTitles: (args: { transcript: Transcript; episodes: EpisodeCandidate[]; config: EpisodeSplitConfig; llm?: LlmConfig }) => Promise<EpisodeCandidate[]>;
+  episodeSplitFixed: (args: { transcript: Transcript; config: EpisodeSplitConfig }) => Promise<EpisodeCandidate[]>;
+  episodeSplitManual: (args: { transcript: Transcript; breakpoints: number[] }) => Promise<EpisodeCandidate[]>;
+  episodeExport: (args: { inputPath: string; episodes: EpisodeCandidate[]; transcript: Transcript; outDir: string; config: EpisodeSplitConfig }) => Promise<EpisodeExportResult[]>;
+  onEpisodeExportProgress: (cb: (p: unknown) => void) => () => void;
   onDiagnosticsProgress: (cb: (p: DiagnosticsProgressEvent) => void) => () => void;
   diagnosticsCancelRepair: () => void;
   /** 选择一个文件夹(录播监听用);取消返回 null。 */

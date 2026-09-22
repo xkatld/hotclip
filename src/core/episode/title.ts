@@ -50,7 +50,7 @@ async function generateTitlesViaLlm(
       ...extraParams(llm.baseUrl),
       ...thinkingParams(llm.model),
     }),
-  }, { signal, budget, timeoutMs: timeout });
+  }, { signal, budget });
 
   try {
     const match = res.text.match(/\{[\s\S]*\}/);

@@ -14,7 +14,7 @@ function makeLongTranscript(durationSec = 7200, intervalSec = 60): Transcript {
       words: [],
     });
   }
-  return { segments, durationSec, language: "zh" } as Transcript;
+  return { segments, durationSec, language: "zh" } as unknown as Transcript;
 }
 
 describe("parseBreaks", () => {
