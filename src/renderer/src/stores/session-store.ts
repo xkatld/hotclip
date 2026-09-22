@@ -75,6 +75,15 @@ interface SessionState {
   /** Human edits only; AI/transcription setters establish a fresh baseline. */
   editHistory: SessionEditHistory;
 
+  // ── 长视频分集模式 ──
+  /** 当前工作模式:clip=爆款切片(默认), episode=长视频分集。 */
+  workMode: "clip" | "episode";
+  episodes: import("../../../shared/api-types").EpisodeCandidate[] | null;
+  episodeSelected: Set<number>;
+  episodeFocusedId: number | null;
+  episodeDetecting: boolean;
+  episodeExporting: boolean;
+
   setFile: (file: ProbedFile | null) => void;
   setTranscript: (t: Transcript | null) => void;
   setAuto: (v: boolean) => void;
@@ -95,6 +104,14 @@ interface SessionState {
   setReferencePath: (p: string | null) => void;
   markParamsDirty: (v: boolean) => void;
   setExporting: (v: { clips: HighlightCandidate[]; options: RenderToggles } | null) => void;
+  setWorkMode: (m: "clip" | "episode") => void;
+  setEpisodes: (eps: import("../../../shared/api-types").EpisodeCandidate[] | null) => void;
+  setEpisodeSelected: (ids: Set<number>) => void;
+  toggleEpisodeSelected: (id: number) => void;
+  setEpisodeFocusedId: (id: number | null) => void;
+  setEpisodeDetecting: (v: boolean) => void;
+  setEpisodeExporting: (v: boolean) => void;
+  patchEpisode: (id: number, patch: Partial<import("../../../shared/api-types").EpisodeCandidate>) => void;
   /** 从已验证的磁盘检查点恢复稳定字段，并把所有瞬态重置为空闲。 */
   restore: (checkpoint: SessionCheckpoint) => void;
   /** 换素材/重开:回到导入态,清空一切会话状态。 */
@@ -108,6 +125,12 @@ export const useSession = create<SessionState>((set, get) => ({
   settingsOpen: false,
   candidates: null,
   selected: new Set<number>(),
+  workMode: "clip",
+  episodes: null,
+  episodeSelected: new Set<number>(),
+  episodeFocusedId: null,
+  episodeDetecting: false,
+  episodeExporting: false,
   focusedId: null,
   detecting: false,
   detectError: null,

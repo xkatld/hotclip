@@ -47,6 +47,10 @@ import { loudnessCurve, motionCurve } from "@core/signals";
 import { extractFilmstrip } from "@core/filmstrip";
 import { collectVoiceEmotionSignal } from "@core/voice-emotion";
 import { checkForUpdate } from "@core/update-check";
+import { detectEpisodes } from "@core/episode/detect";
+import { enrichEpisodeTitles } from "@core/episode/title";
+import { exportEpisodes, type EpisodeExportProgress } from "@core/episode/export";
+import { manualSplit, fixedSplit } from "@core/episode/split";
 import { clipOutDir } from "@core/appenv";
 import { defaultModelsRoot, readAppSettings, resolveModelsRoot, writeAppSettings } from "@core/app-settings";
 import { inspectModels, moveModelsDir } from "@core/models-inventory";
@@ -1499,6 +1503,50 @@ ipcMain.handle("hotclip:check-update", async () => {
 ipcMain.handle("hotclip:glossary-get", async () => loadGlossary(app.getPath("userData")));
 ipcMain.handle("hotclip:glossary-set", async (_event, entries: unknown) => {
   await saveGlossary(app.getPath("userData"), Array.isArray(entries) ? entries : []);
+});
+
+// ---- 长视频分集模式 ----
+ipcMain.handle("hotclip:episode-detect", async (_event, args: {
+  transcript: import("../shared/api-types").Transcript;
+  llm: import("../shared/api-types").LlmConfig;
+  config: import("../shared/api-types").EpisodeSplitConfig;
+}) => {
+  return detectEpisodes(args.transcript, args.llm, args.config);
+});
+
+ipcMain.handle("hotclip:episode-titles", async (_event, args: {
+  transcript: import("../shared/api-types").Transcript;
+  episodes: import("../shared/api-types").EpisodeCandidate[];
+  config: import("../shared/api-types").EpisodeSplitConfig;
+  llm?: import("../shared/api-types").LlmConfig;
+}) => {
+  return enrichEpisodeTitles(args.transcript, args.episodes, args.config, args.llm);
+});
+
+ipcMain.handle("hotclip:episode-split-fixed", async (_event, args: {
+  transcript: import("../shared/api-types").Transcript;
+  config: import("../shared/api-types").EpisodeSplitConfig;
+}) => {
+  return fixedSplit(args.transcript, args.config);
+});
+
+ipcMain.handle("hotclip:episode-split-manual", async (_event, args: {
+  transcript: import("../shared/api-types").Transcript;
+  breakpoints: number[];
+}) => {
+  return manualSplit(args.transcript, args.breakpoints);
+});
+
+ipcMain.handle("hotclip:episode-export", async (event, args: {
+  inputPath: string;
+  episodes: import("../shared/api-types").EpisodeCandidate[];
+  transcript: import("../shared/api-types").Transcript;
+  outDir: string;
+  config: import("../shared/api-types").EpisodeSplitConfig;
+}) => {
+  return exportEpisodes(args.inputPath, args.episodes, args.transcript, args.outDir, args.config, {
+    onProgress: (p: EpisodeExportProgress) => event.sender.send("hotclip:episode-export-progress", p),
+  });
 });
 
 // 外链只放行本项目 GitHub(防任意 URL 注入系统浏览器)

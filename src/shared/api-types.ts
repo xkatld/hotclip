@@ -1002,3 +1002,66 @@ export interface UpdateInfo {
   hasUpdate: boolean;
   url: string;
 }
+
+// ─── 长视频分集模式 ───────────────────────────────────────────
+
+/** 分集模式:智能(LLM 按话题断点) / 等时(固定间隔) / 手动(用户标记断点)。 */
+export type EpisodeMode = "smart" | "fixed" | "manual";
+
+/** 序号格式。 */
+export type EpisodeNumberFormat = "P{n}" | "第{n}集" | "{n}" | "{nn}";
+
+/** 分集配置。 */
+export interface EpisodeSplitConfig {
+  mode: EpisodeMode;
+  /** 目标最短时长(秒);默认 600 = 10 分钟。 */
+  targetMinSec: number;
+  /** 目标最长时长(秒);默认 1200 = 20 分钟。 */
+  targetMaxSec: number;
+  /** 等时模式的固定间隔(秒);默认 900 = 15 分钟。 */
+  fixedIntervalSec?: number;
+  /** 标题模板,支持 {prefix} / {number} / {title} 占位。 */
+  titleTemplate: string;
+  /** 系列名前缀,如"弱口令漏洞"。 */
+  titlePrefix: string;
+  /** 序号格式。 */
+  numberFormat: EpisodeNumberFormat;
+  /** 导出时是否烧录字幕。 */
+  subtitles: boolean;
+  /** 导出时是否旁落 SRT 文件。 */
+  srtFile: boolean;
+}
+
+/** 分集候选(一集)。 */
+export interface EpisodeCandidate {
+  id: number;
+  title: string;
+  startSec: number;
+  endSec: number;
+  durationSec: number;
+  /** 为什么在这里断(AI 给的理由,等时/手动模式为空)。 */
+  reason: string;
+}
+
+/** 分集导出结果(一集)。 */
+export interface EpisodeExportResult {
+  id: number;
+  title: string;
+  outputPath: string;
+  srtPath?: string;
+  startSec: number;
+  endSec: number;
+  durationSec: number;
+}
+
+export const EPISODE_SPLIT_DEFAULTS: EpisodeSplitConfig = {
+  mode: "smart",
+  targetMinSec: 600,
+  targetMaxSec: 1200,
+  fixedIntervalSec: 900,
+  titleTemplate: "【{prefix}】{number} {title}",
+  titlePrefix: "",
+  numberFormat: "P{n}",
+  subtitles: false,
+  srtFile: false,
+};

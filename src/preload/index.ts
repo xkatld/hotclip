@@ -99,6 +99,17 @@ const api: HotClipApi = {
   openUrl: (url) => ipcRenderer.send("hotclip:open-url", url),
   glossaryGet: () => ipcRenderer.invoke("hotclip:glossary-get"),
   glossarySet: (entries) => ipcRenderer.invoke("hotclip:glossary-set", entries),
+  // 长视频分集
+  episodeDetect: (args) => ipcRenderer.invoke("hotclip:episode-detect", args),
+  episodeTitles: (args) => ipcRenderer.invoke("hotclip:episode-titles", args),
+  episodeSplitFixed: (args) => ipcRenderer.invoke("hotclip:episode-split-fixed", args),
+  episodeSplitManual: (args) => ipcRenderer.invoke("hotclip:episode-split-manual", args),
+  episodeExport: (args) => ipcRenderer.invoke("hotclip:episode-export", args),
+  onEpisodeExportProgress: (cb) => {
+    const listener = (_e: IpcRendererEvent, p: unknown): void => cb(p);
+    ipcRenderer.on("hotclip:episode-export-progress", listener);
+    return () => ipcRenderer.removeListener("hotclip:episode-export-progress", listener);
+  },
 };
 
 contextBridge.exposeInMainWorld("hotclip", api);

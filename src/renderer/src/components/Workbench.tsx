@@ -20,6 +20,9 @@ import { TranscriptPanel } from "./workbench/TranscriptPanel";
 import { Inspector } from "./workbench/Inspector";
 import { ExportBar } from "./workbench/ExportBar";
 import { ExportPanel } from "./workbench/ExportPanel";
+import { EpisodeParams } from "./workbench/EpisodeParams";
+import { EpisodeTable } from "./workbench/EpisodeTable";
+import { EpisodeExportBar } from "./workbench/EpisodeExportBar";
 import { TranscribeView } from "./TranscribeView";
 import { ExportView } from "./ExportView";
 import { ClipReviewModal } from "./ClipReviewModal";
@@ -119,6 +122,7 @@ function LeftRail({ onOpenWatch }: { onOpenWatch: () => void }): React.JSX.Eleme
 /** 检测阶段的信号统计行(检测完成后展示在候选页签头)。 */
 function StatsLine(): React.JSX.Element | null {
   const th = useT("highlights");
+  const te = useT("episode");
   const { stats } = useSession();
   const bits: Array<{ key: string; cls: string; text: string }> = [];
   if (stats.funnel)
@@ -378,6 +382,35 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
                 onFocus={focusCandidate}
                 onSeek={seek}
               />}
+              {/* 模式切换:爆款切片 / 长视频分集 */}
+              <div className="mb-2 flex shrink-0 items-center gap-1">
+                {(
+                  [
+                    ["clip", te("modeClip")],
+                    ["episode", te("modeEpisode")],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => session.setWorkMode(key)}
+                    className={`rounded-lg px-3 py-1.5 text-[11.5px] font-bold transition-colors ${
+                      session.workMode === key ? "bg-ember/12 text-ember" : "text-mut hover:text-fg"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {session.workMode === "episode" ? (
+                /* ── 分集模式:参数面板 + 结果表 ── */
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <EpisodeParams />
+                  <EpisodeTable />
+                </div>
+              ) : (
+              <>
               {/* 候选 / 逐句稿 页签 */}
               <div className="flex shrink-0 items-center gap-1.5">
                 {(
@@ -501,11 +534,21 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
           )}
         </div>
 
-        {transcript && tab !== "transcript" && <Inspector transcript={transcript} onRedetect={() => void run()} onOpenReview={setReviewId} />}
+        </>
+              )}
+        {transcript && tab !== "transcript" && session.workMode === "clip" && <Inspector transcript={transcript} onRedetect={() => void run()} onOpenReview={setReviewId} />}
+        {transcript && session.workMode === "episode" && (
+          <div className="flex w-[300px] shrink-0 flex-col border-l border-line/70 bg-panel/40 p-3.5 overflow-y-auto">
+            <EpisodeParams />
+          </div>
+        )}
       </div>
 
-      {transcript && candidates && candidates.length > 0 && (
+      {transcript && session.workMode === "clip" && candidates && candidates.length > 0 && (
         <ExportBar defaultOutDir={defaultOutDir} onExport={startExport} onOpenPanel={() => setShowExportPanel(true)} />
+      )}
+      {transcript && session.workMode === "episode" && session.episodes && session.episodes.length > 0 && (
+        <EpisodeExportBar onExport={() => { /* TODO: episode export */ }} />
       )}
 
       {/* ---- 导出进行中:中央覆盖层(候选保留在 store,出完直接回来) ---- */}
