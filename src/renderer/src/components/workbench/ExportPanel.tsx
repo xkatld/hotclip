@@ -127,14 +127,18 @@ export function ExportPanel({
 
         <div className="mt-3.5 grid min-h-0 flex-1 grid-cols-1 gap-2.5 overflow-y-auto pr-1 sm:grid-cols-2">
           <Group title={t("groupPicture")}>
-            <SwitchRow label={th("optVertical")} hint={th("optVerticalHint")} on={prefs.vertical} onToggle={() => setPref({ vertical: !prefs.vertical })} />
-            <SwitchRow
-              label={th("optAlsoLandscape")}
-              hint={th("optAlsoLandscapeHint")}
-              on={prefs.alsoLandscape && prefs.vertical}
-              disabled={!prefs.vertical}
-              onToggle={() => setPref({ alsoLandscape: !prefs.alsoLandscape })}
-            />
+            <div className="flex min-h-7.5 items-center gap-2.5" title={th("aspectHint")}>
+              <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg/90">{th("aspectLabel")}</span>
+              <Segmented<string>
+                value={prefs.vertical ? (prefs.alsoLandscape ? "both" : "vertical") : "landscape"}
+                options={[
+                  { value: "vertical", label: th("optVertical") },
+                  { value: "landscape", label: th("optLandscape") },
+                  { value: "both", label: th("optBothAspect") },
+                ]}
+                onChange={(v) => setPref(v === "vertical" ? { vertical: true, alsoLandscape: false } : v === "landscape" ? { vertical: false, alsoLandscape: false } : { vertical: true, alsoLandscape: true })}
+              />
+            </div>
             <SwitchRow label={th("optTrimUi")} hint={th("optTrimUiHint")} on={prefs.trimUi} onToggle={() => setPref({ trimUi: !prefs.trimUi })} />
             <SwitchRow label={th("optTitleCard")} hint={th("optTitleCardHint")} on={prefs.titleCard} onToggle={() => setPref({ titleCard: !prefs.titleCard })} />
             <SwitchRow

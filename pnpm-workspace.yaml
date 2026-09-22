@@ -1,0 +1,6 @@
+allowBuilds:
+  '@ffprobe-installer/linux-x64': set this to true or false
+  electron-winstaller: set this to true or false
+  esbuild: set this to true or false
+  ffmpeg-static: set this to true or false
+  onnxruntime-node: set this to true or false
