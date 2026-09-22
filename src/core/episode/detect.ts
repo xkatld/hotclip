@@ -1,25 +1,65 @@
 /**
- * 分集检测编排器:转写结果 → LLM 识别话题断点 → 分集候选列表。
- * 与爆点检测(highlight/detect.ts)并行的另一条管线。
+ * 分集检测编排器:转写结果 → 分窗口 LLM 识别话题断点 → 合并 → 分集候选列表。
+ *
+ * 核心策略(与爆款检测不同):
+ * 两小时视频的逐句稿可能有数千句,一次 LLM 请求会超 token 上限甚至 524。
+ * 因此采用**滑动窗口**:按 ~30 分钟切块,每块独立调 LLM 找断点,最后合并去重。
+ * 窗口之间有 2 分钟重叠区,确保边界处的话题切换不被遗漏。
  */
 import type { Transcript, LlmConfig, EpisodeCandidate, EpisodeSplitConfig } from "../../shared/api-types";
-import { episodeSystemPrompt, buildEpisodePrompt } from "./prompt";
-import { parseBreaks, smartSplit, fixedSplit } from "./split";
+import { episodeSystemPrompt, buildWindowPrompt, isChineseTranscript } from "./prompt";
+import { parseBreaks, smartSplit, fixedSplit, type RawBreak } from "./split";
 import { requestLlmText, llmRequestBudget } from "../llm-transport";
 import { isLocalBaseUrl } from "../../shared/llm-preflight";
 import { extraParams, thinkingParams, MAX_TOKENS } from "../highlight/detect";
 
-/** 调一次 LLM 拿章节断点。 */
-async function chatEpisodeDetect(
+/** 每个窗口约 30 分钟(秒)。 */
+const WINDOW_SEC = 30 * 60;
+/** 相邻窗口重叠 2 分钟,防止边界遗漏。 */
+const OVERLAP_SEC = 2 * 60;
+
+/** 把逐句稿按时间切成窗口。 */
+function splitWindows(transcript: Transcript): { startSec: number; endSec: number; segments: typeof transcript.segments }[] {
+  const totalSec = transcript.durationSec;
+  if (totalSec <= 0) return [];
+  const windows: { startSec: number; endSec: number; segments: typeof transcript.segments }[] = [];
+  let cursor = 0;
+  while (cursor < totalSec) {
+    const winEnd = Math.min(cursor + WINDOW_SEC, totalSec);
+    const segs = transcript.segments.filter((s) => s.startSec >= cursor && s.startSec < winEnd + OVERLAP_SEC);
+    windows.push({ startSec: cursor, endSec: winEnd, segments: segs });
+    cursor = winEnd;
+  }
+  return windows;
+}
+
+/** 对单个窗口调一次 LLM。 */
+async function detectWindow(
   llm: LlmConfig,
-  system: string,
-  user: string,
+  systemPrompt: string,
+  windowSegs: Transcript['segments'],
+  windowStart: number,
+  windowEnd: number,
+  totalDurationSec: number,
+  targetMinSec: number,
+  targetMaxSec: number,
+  zh: boolean,
   signal?: AbortSignal
-): Promise<string> {
+): Promise<RawBreak[]> {
   const url = `${llm.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  // 分集逐句稿很长,给足超时:本地模型 5 分钟,远程 3 分钟
-  const timeoutMs = isLocalBaseUrl(llm.baseUrl) ? 300_000 : 180_000;
+  const timeoutMs = isLocalBaseUrl(llm.baseUrl) ? 180_000 : 90_000;
   const budget = llmRequestBudget(timeoutMs);
+
+  const userPrompt = buildWindowPrompt(
+    windowSegs,
+    windowStart,
+    windowEnd,
+    totalDurationSec,
+    targetMinSec,
+    targetMaxSec,
+    zh
+  );
+
   const res = await requestLlmText(url, {
     method: "POST",
     headers: {
@@ -29,8 +69,8 @@ async function chatEpisodeDetect(
     body: JSON.stringify({
       model: llm.model,
       messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
       ],
       temperature: 0.3,
       max_tokens: MAX_TOKENS,
@@ -38,21 +78,31 @@ async function chatEpisodeDetect(
       ...thinkingParams(llm.model),
     }),
   }, { signal, budget });
-  return res.text;
+
+  return parseBreaks(res.text);
 }
 
-/**
- * 分集结果,附带是否回退的信息。
- * fallbackReason 非空表示 AI 未成功,已自动回退等时切割。
- */
+/** 合并多个窗口的断点:去重(时间太近的合并)。 */
+function mergeBreaks(allBreaks: RawBreak[]): RawBreak[] {
+  const sorted = allBreaks.sort((a, b) => a.timeSec - b.timeSec);
+  const merged: RawBreak[] = [];
+  for (const b of sorted) {
+    if (merged.length === 0 || b.timeSec - merged[merged.length - 1].timeSec >= 60) {
+      merged.push(b);
+    }
+  }
+  return merged;
+}
+
+/** 分集结果,附带回退信息。 */
 export interface EpisodeDetectResult {
   episodes: EpisodeCandidate[];
   fallbackReason?: string;
 }
 
 /**
- * 智能分集:调 LLM 找话题断点,然后按断点切割。
- * LLM 超时/格式错误时自动回退等时切割,并返回回退原因。
+ * 智能分集:分窗口调 LLM → 合并断点 → 分集。
+ * 单窗口失败不阻塞,只跳过;全部失败才回退等时。
  */
 export async function detectEpisodes(
   transcript: Transcript,
@@ -67,26 +117,71 @@ export async function detectEpisodes(
     return { episodes: [] };
   }
 
-  // smart 模式
-  try {
-    const system = episodeSystemPrompt(transcript);
-    const user = buildEpisodePrompt(transcript, config.targetMinSec, config.targetMaxSec);
-    const raw = await chatEpisodeDetect(llm, system, user, signal);
-    const breaks = parseBreaks(raw);
-    if (breaks.length === 0) {
-      // LLM 返回了但没找到断点,回退等时
+  // smart 模式:分窗口
+  const zh = isChineseTranscript(transcript);
+  const systemPrompt = episodeSystemPrompt(transcript);
+  const windows = splitWindows(transcript);
+
+  // 短视频(≤35分钟)不分窗口,一次搞定
+  if (windows.length <= 1) {
+    try {
+      const breaks = await detectWindow(
+        llm, systemPrompt, transcript.segments,
+        0, transcript.durationSec, transcript.durationSec,
+        config.targetMinSec, config.targetMaxSec, zh, signal
+      );
+      if (breaks.length === 0) {
+        return {
+          episodes: fixedSplit(transcript, config),
+          fallbackReason: "AI 未识别到话题断点,已自动按等时切割",
+        };
+      }
+      return { episodes: smartSplit(transcript, breaks, config) };
+    } catch (err) {
       return {
         episodes: fixedSplit(transcript, config),
-        fallbackReason: "AI 未识别到话题断点,已自动按等时切割",
+        fallbackReason: `AI 调用失败,已按等时切割。原因: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
-    return { episodes: smartSplit(transcript, breaks, config) };
-  } catch (err) {
-    // LLM 失败,回退等时切割,但告诉用户原因
-    const reason = err instanceof Error ? err.message : String(err);
+  }
+
+  // 长视频:逐窗口调 LLM,收集所有断点
+  const allBreaks: RawBreak[] = [];
+  const errors: string[] = [];
+
+  for (let i = 0; i < windows.length; i++) {
+    signal?.throwIfAborted();
+    const w = windows[i];
+    try {
+      const breaks = await detectWindow(
+        llm, systemPrompt, w.segments,
+        w.startSec, w.endSec, transcript.durationSec,
+        config.targetMinSec, config.targetMaxSec, zh, signal
+      );
+      allBreaks.push(...breaks);
+    } catch (err) {
+      errors.push(`窗口${i + 1}(${Math.round(w.startSec / 60)}-${Math.round(w.endSec / 60)}分): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  if (allBreaks.length === 0) {
+    // 所有窗口都失败了
     return {
       episodes: fixedSplit(transcript, config),
-      fallbackReason: `AI 调用失败,已自动按等时切割。原因: ${reason}`,
+      fallbackReason: errors.length > 0
+        ? `AI 全部窗口失败,已按等时切割。错误: ${errors[0]}`
+        : "AI 未识别到话题断点,已自动按等时切割",
     };
   }
+
+  const merged = mergeBreaks(allBreaks);
+  const episodes = smartSplit(transcript, merged, config);
+
+  return {
+    episodes,
+    // 部分窗口失败时提示
+    fallbackReason: errors.length > 0
+      ? `${windows.length} 个窗口中 ${errors.length} 个AI调用失败,结果可能不完整`
+      : undefined,
+  };
 }
