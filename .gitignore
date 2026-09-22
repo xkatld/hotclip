@@ -27,3 +27,5 @@ build/icon-b64.txt
 
 # Optional isolated speech runtime
 .venv-qwen/
+
+AGENTS.md

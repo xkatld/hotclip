@@ -8,7 +8,7 @@
  */
 import type { Transcript, LlmConfig, EpisodeCandidate, EpisodeSplitConfig } from "../../shared/api-types";
 import { episodeSystemPrompt, buildWindowPrompt, isChineseTranscript } from "./prompt";
-import { parseBreaks, smartSplit, fixedSplit, type RawBreak } from "./split";
+import { parseBreaks, smartSplit, fixedSplit, resolveTargetInterval, type RawBreak } from "./split";
 import { requestLlmText, llmRequestBudget } from "../llm-transport";
 import { isLocalBaseUrl } from "../../shared/llm-preflight";
 import { extraParams, thinkingParams, MAX_TOKENS } from "../highlight/detect";
@@ -113,6 +113,8 @@ export async function detectEpisodes(
   if (config.mode === "fixed") {
     return { episodes: fixedSplit(transcript, config) };
   }
+  // 智能模式的兜底切割统一用目标范围中点,不与等时模式的独立间隔混用
+  const fallbackInterval = resolveTargetInterval(config);
   if (config.mode === "manual") {
     return { episodes: [] };
   }
@@ -132,15 +134,15 @@ export async function detectEpisodes(
       );
       if (breaks.length === 0) {
         return {
-          episodes: fixedSplit(transcript, config),
-          fallbackReason: "AI 未识别到话题断点,已自动按等时切割",
+          episodes: fixedSplit(transcript, config, fallbackInterval),
+          fallbackReason: "AI 未识别到话题断点,已按目标时长范围自动切割",
         };
       }
       return { episodes: smartSplit(transcript, breaks, config) };
     } catch (err) {
       return {
-        episodes: fixedSplit(transcript, config),
-        fallbackReason: `AI 调用失败,已按等时切割。原因: ${err instanceof Error ? err.message : String(err)}`,
+        episodes: fixedSplit(transcript, config, fallbackInterval),
+        fallbackReason: `AI 调用失败,已按目标时长范围自动切割。原因: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
   }
@@ -167,10 +169,10 @@ export async function detectEpisodes(
   if (allBreaks.length === 0) {
     // 所有窗口都失败了
     return {
-      episodes: fixedSplit(transcript, config),
+      episodes: fixedSplit(transcript, config, fallbackInterval),
       fallbackReason: errors.length > 0
-        ? `AI 全部窗口失败,已按等时切割。错误: ${errors[0]}`
-        : "AI 未识别到话题断点,已自动按等时切割",
+        ? `AI 全部窗口失败,已按目标时长范围自动切割。错误: ${errors[0]}`
+        : "AI 未识别到话题断点,已按目标时长范围自动切割",
     };
   }
 

@@ -76,8 +76,8 @@ export function smartSplit(
   }
 
   if (deduped.length === 0) {
-    // LLM 没找到断点,回退等时
-    return fixedSplit(transcript, config);
+    // LLM 没找到断点,回退等时;间隔取用户设的目标范围中点,不用等时模式的独立间隔
+    return fixedSplit(transcript, config, resolveTargetInterval(config));
   }
 
   const episodes: EpisodeCandidate[] = [];
@@ -111,10 +111,21 @@ export function smartSplit(
   return episodes;
 }
 
-/** 等时分集:按固定间隔切割,在最近句子边界微调。 */
-export function fixedSplit(transcript: Transcript, config: EpisodeSplitConfig): EpisodeCandidate[] {
+/**
+ * 智能分集回退时用的间隔:取用户设的目标时长范围中点,而不是等时模式的
+ * 独立 fixedIntervalSec(那个值在智能模式下输入框是隐藏的,默认 15 分钟,
+ * 与用户在智能模式实际填的目标范围毫无关系——这就是"调了范围也不生效"的根因)。
+ */
+export function resolveTargetInterval(config: EpisodeSplitConfig): number {
+  const lo = config.targetMinSec > 0 ? config.targetMinSec : 600;
+  const hi = config.targetMaxSec > lo ? config.targetMaxSec : lo + 600;
+  return Math.round((lo + hi) / 2);
+}
+
+/** 等时分集:按固定间隔切割,在最近句子边界微调。intervalSecOverride 优先于 config.fixedIntervalSec。 */
+export function fixedSplit(transcript: Transcript, config: EpisodeSplitConfig, intervalSecOverride?: number): EpisodeCandidate[] {
   const totalSec = transcript.durationSec;
-  const interval = config.fixedIntervalSec ?? 900;
+  const interval = intervalSecOverride ?? config.fixedIntervalSec ?? 900;
   if (totalSec <= 0 || interval <= 0) return [];
 
   const episodes: EpisodeCandidate[] = [];
