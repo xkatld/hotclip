@@ -36,7 +36,7 @@ async function chatEpisodeDetect(
       ...extraParams(llm.baseUrl),
       ...thinkingParams(llm.model),
     }),
-  }, { signal, budget, timeoutMs: timeout });
+  }, { signal, budget });
   return res.text;
 }
 

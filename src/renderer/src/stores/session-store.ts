@@ -229,6 +229,22 @@ export const useSession = create<SessionState>((set, get) => ({
       editHistory: checkpoint.editHistory ? compactSessionEditHistory(checkpoint.editHistory) : emptySessionEditHistory(),
     });
   },
+  setWorkMode: (m) => set({ workMode: m }),
+  setEpisodes: (eps) => set({ episodes: eps }),
+  setEpisodeSelected: (ids) => set({ episodeSelected: ids }),
+  toggleEpisodeSelected: (id) => {
+    const s = new Set(get().episodeSelected);
+    if (s.has(id)) s.delete(id); else s.add(id);
+    set({ episodeSelected: s });
+  },
+  setEpisodeFocusedId: (id) => set({ episodeFocusedId: id }),
+  setEpisodeDetecting: (v) => set({ episodeDetecting: v }),
+  setEpisodeExporting: (v) => set({ episodeExporting: v }),
+  patchEpisode: (id, patch) => {
+    const eps = get().episodes;
+    if (!eps) return;
+    set({ episodes: eps.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
+  },
   reset: () =>
     set({
       file: null,

@@ -170,6 +170,7 @@ function StatsLine(): React.JSX.Element | null {
 export function Workbench({ onCloseProject }: { onCloseProject: () => void }): React.JSX.Element {
   const t = useT("workbench");
   const th = useT("highlights");
+  const te = useT("episode");
   const session = useSession();
   const { file, transcript, auto, candidates, detecting, detectError, selected, focusedId, exporting, stats } = session;
   const { config } = useLlmStore();
@@ -360,6 +361,21 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
             </div>
           ) : (
             <>
+            {/* 模式切换 */}
+            <div className="mb-2 flex shrink-0 items-center gap-1">
+              {([["clip", te("modeClip")], ["episode", te("modeEpisode")]] as const).map(([key, label]) => (
+                <button key={key} type="button" onClick={() => session.setWorkMode(key)}
+                  className={`rounded-lg px-3 py-1.5 text-[11.5px] font-bold transition-colors ${session.workMode === key ? "bg-ember/12 text-ember" : "text-mut hover:text-fg"}`}
+                >{label}</button>
+              ))}
+            </div>
+            {session.workMode === "episode" && (
+              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                <EpisodeParams />
+                <EpisodeTable />
+              </div>
+            )}
+            <div style={session.workMode !== "clip" ? {display:"none"} : undefined} className="contents">
               <PreviewPane
                 filePath={file.path}
                 durationSec={durationSec}
@@ -382,35 +398,6 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
                 onFocus={focusCandidate}
                 onSeek={seek}
               />}
-              {/* 模式切换:爆款切片 / 长视频分集 */}
-              <div className="mb-2 flex shrink-0 items-center gap-1">
-                {(
-                  [
-                    ["clip", te("modeClip")],
-                    ["episode", te("modeEpisode")],
-                  ] as const
-                ).map(([key, label]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => session.setWorkMode(key)}
-                    className={`rounded-lg px-3 py-1.5 text-[11.5px] font-bold transition-colors ${
-                      session.workMode === key ? "bg-ember/12 text-ember" : "text-mut hover:text-fg"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-
-              {session.workMode === "episode" ? (
-                /* ── 分集模式:参数面板 + 结果表 ── */
-                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <EpisodeParams />
-                  <EpisodeTable />
-                </div>
-              ) : (
-              <>
               {/* 候选 / 逐句稿 页签 */}
               <div className="flex shrink-0 items-center gap-1.5">
                 {(
@@ -530,25 +517,19 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
               ) : (
                 <div className="min-h-0 flex-1" />
               )}
+            </div>
             </>
           )}
         </div>
 
-        </>
-              )}
         {transcript && tab !== "transcript" && session.workMode === "clip" && <Inspector transcript={transcript} onRedetect={() => void run()} onOpenReview={setReviewId} />}
-        {transcript && session.workMode === "episode" && (
-          <div className="flex w-[300px] shrink-0 flex-col border-l border-line/70 bg-panel/40 p-3.5 overflow-y-auto">
-            <EpisodeParams />
-          </div>
-        )}
       </div>
 
       {transcript && session.workMode === "clip" && candidates && candidates.length > 0 && (
         <ExportBar defaultOutDir={defaultOutDir} onExport={startExport} onOpenPanel={() => setShowExportPanel(true)} />
       )}
       {transcript && session.workMode === "episode" && session.episodes && session.episodes.length > 0 && (
-        <EpisodeExportBar onExport={() => { /* TODO: episode export */ }} />
+        <EpisodeExportBar onExport={() => {}} />
       )}
 
       {/* ---- 导出进行中:中央覆盖层(候选保留在 store,出完直接回来) ---- */}

@@ -122,8 +122,8 @@ export function fixedSplit(transcript: Transcript, config: EpisodeSplitConfig): 
 
   while (prevSec < totalSec - 10) {
     let endSec = prevSec + interval;
-    if (endSec >= totalSec - 30) {
-      // 最后不足一个间隔的部分并入末集
+    if (totalSec - endSec < config.targetMinSec) {
+      // 剩余不足一集最短时长,并入末集
       endSec = totalSec;
     } else {
       endSec = snapToSentenceBoundary(endSec, transcript, 10);
@@ -202,5 +202,5 @@ export function applyTitleTemplate(
     .replace("{prefix}", prefix)
     .replace("{number}", number)
     .replace("{title}", title)
-    .replace(/^[\s【\[]*[\s】\]]*\s*/, ""); // 前缀为空时清理残留括号
+    .replace(/【】/g, "").replace(/\[\]/g, "").replace(/^\s+/, ""); // 前缀为空时清理空括号对
 }

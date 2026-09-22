@@ -833,7 +833,6 @@ export const zh = {
     cancelTask: "取消",
     retryTask: "重试",
   },
-} as const;
   episode: {
     modeClip: "爆款切片",
     modeEpisode: "长视频分集",
@@ -870,4 +869,5 @@ export const zh = {
     min: "分钟",
     noTranscript: "请先完成转写,再使用分集功能",
   },
+} as const;
 

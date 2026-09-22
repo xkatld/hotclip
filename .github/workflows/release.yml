@@ -62,10 +62,8 @@ jobs:
         with:
           name: installers-${{ matrix.os }}
           path: |
-            # dist/*.dmg          # macOS 暂停
             dist/*.exe
             dist/*.zip
-            # dist/*.AppImage     # Linux 暂停
             dist/*.blockmap
             dist/latest*.yml
           if-no-files-found: error
@@ -97,15 +95,10 @@ jobs:
           fi
 
           required_patterns=(
-            # "assets/*.dmg"            # macOS 暂停
-            # "assets/*.dmg.blockmap"    # macOS 暂停
             "assets/*.exe"
             "assets/*.exe.blockmap"
             "assets/*.zip"
-            # "assets/*.AppImage"        # Linux 暂停
             "assets/latest.yml"
-            # "assets/latest-mac.yml"    # macOS 暂停
-            # "assets/latest-linux.yml"  # Linux 暂停
           )
 
           for pattern in "${required_patterns[@]}"; do
