@@ -779,6 +779,30 @@ const browserMock: HotClipApi = {
     }
     return { candidates, funnel, vision: visionStats, emotion: emotionStats, danmaku: danmakuStats, voice: voiceStats, reference };
   },
+  // ── 长视频分集 (mock stubs) ──
+  async episodeDetect() {
+    await sleep(800);
+    return [{ id: 1, startSec: 0, endSec: 600, title: "Episode 1" }, { id: 2, startSec: 600, endSec: 1200, title: "Episode 2" }] as any;
+  },
+  async episodeTitles(_args: any) {
+    await sleep(400);
+    return _args.episodes;
+  },
+  async episodeSplitFixed(_args: any) {
+    await sleep(200);
+    return [{ id: 1, startSec: 0, endSec: 600, title: "Part 1" }] as any;
+  },
+  async episodeSplitManual(_args: any) {
+    await sleep(200);
+    return _args.breakpoints.map((bp: number, i: number) => ({ id: i + 1, startSec: i === 0 ? 0 : _args.breakpoints[i - 1], endSec: bp, title: `Part ${i + 1}` }));
+  },
+  async episodeExport() {
+    await sleep(1000);
+    return [];
+  },
+  onEpisodeExportProgress() {
+    return () => {};
+  },
 };
 
 /** True when running inside Electron with the preload bridge available. */
