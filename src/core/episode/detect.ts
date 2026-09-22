@@ -135,15 +135,13 @@ export async function detectEpisodes(
       if (breaks.length === 0) {
         return {
           episodes: fixedSplit(transcript, config, fallbackInterval),
-          fallbackReason: "AI 未识别到话题断点,已按目标时长范围自动切割",
-        };
+          fallbackReason: "AI 未识别到话题断点,已按目标时长范围自动切割",        };
       }
       return { episodes: smartSplit(transcript, breaks, config) };
     } catch (err) {
       return {
         episodes: fixedSplit(transcript, config, fallbackInterval),
-        fallbackReason: `AI 调用失败,已按目标时长范围自动切割。原因: ${err instanceof Error ? err.message : String(err)}`,
-      };
+        fallbackReason: `AI 调用失败,已按目标时长范围自动切割。原因: ${err instanceof Error ? err.message : String(err)}`,      };
     }
   }
 
@@ -172,8 +170,7 @@ export async function detectEpisodes(
       episodes: fixedSplit(transcript, config, fallbackInterval),
       fallbackReason: errors.length > 0
         ? `AI 全部窗口失败,已按目标时长范围自动切割。错误: ${errors[0]}`
-        : "AI 未识别到话题断点,已按目标时长范围自动切割",
-    };
+        : "AI 未识别到话题断点,已按目标时长范围自动切割",    };
   }
 
   const merged = mergeBreaks(allBreaks);
