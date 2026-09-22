@@ -782,7 +782,7 @@ const browserMock: HotClipApi = {
   // ── 长视频分集 (mock stubs) ──
   async episodeDetect() {
     await sleep(800);
-    return [{ id: 1, startSec: 0, endSec: 600, title: "Episode 1" }, { id: 2, startSec: 600, endSec: 1200, title: "Episode 2" }] as any;
+    return { episodes: [{ id: 1, startSec: 0, endSec: 600, title: "Episode 1", durationSec: 600, reason: "" }, { id: 2, startSec: 600, endSec: 1200, title: "Episode 2", durationSec: 600, reason: "" }] };
   },
   async episodeTitles(_args: any) {
     await sleep(400);

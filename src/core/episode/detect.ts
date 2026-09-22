@@ -4,7 +4,7 @@
  */
 import type { Transcript, LlmConfig, EpisodeCandidate, EpisodeSplitConfig } from "../../shared/api-types";
 import { episodeSystemPrompt, buildEpisodePrompt } from "./prompt";
-import { parseBreaks, smartSplit, fixedSplit, manualSplit } from "./split";
+import { parseBreaks, smartSplit, fixedSplit } from "./split";
 import { requestLlmText, llmRequestBudget } from "../llm-transport";
 import { isLocalBaseUrl } from "../../shared/llm-preflight";
 import { extraParams, thinkingParams, MAX_TOKENS } from "../highlight/detect";
@@ -17,8 +17,9 @@ async function chatEpisodeDetect(
   signal?: AbortSignal
 ): Promise<string> {
   const url = `${llm.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const timeout = isLocalBaseUrl(llm.baseUrl) ? 120_000 : 60_000;
-  const budget = llmRequestBudget(1);
+  // 分集逐句稿很长,给足超时:本地模型 5 分钟,远程 3 分钟
+  const timeoutMs = isLocalBaseUrl(llm.baseUrl) ? 300_000 : 180_000;
+  const budget = llmRequestBudget(timeoutMs);
   const res = await requestLlmText(url, {
     method: "POST",
     headers: {
@@ -41,21 +42,29 @@ async function chatEpisodeDetect(
 }
 
 /**
+ * 分集结果,附带是否回退的信息。
+ * fallbackReason 非空表示 AI 未成功,已自动回退等时切割。
+ */
+export interface EpisodeDetectResult {
+  episodes: EpisodeCandidate[];
+  fallbackReason?: string;
+}
+
+/**
  * 智能分集:调 LLM 找话题断点,然后按断点切割。
- * 失败时(LLM 超时/返回格式错误)自动回退到等时切割��
+ * LLM 超时/格式错误时自动回退等时切割,并返回回退原因。
  */
 export async function detectEpisodes(
   transcript: Transcript,
   llm: LlmConfig,
   config: EpisodeSplitConfig,
   signal?: AbortSignal
-): Promise<EpisodeCandidate[]> {
+): Promise<EpisodeDetectResult> {
   if (config.mode === "fixed") {
-    return fixedSplit(transcript, config);
+    return { episodes: fixedSplit(transcript, config) };
   }
   if (config.mode === "manual") {
-    // manual 模式由 UI 层直接调 manualSplit,这里不��走到
-    return [];
+    return { episodes: [] };
   }
 
   // smart 模式
@@ -64,9 +73,20 @@ export async function detectEpisodes(
     const user = buildEpisodePrompt(transcript, config.targetMinSec, config.targetMaxSec);
     const raw = await chatEpisodeDetect(llm, system, user, signal);
     const breaks = parseBreaks(raw);
-    return smartSplit(transcript, breaks, config);
+    if (breaks.length === 0) {
+      // LLM 返回了但没找到断点,回退等时
+      return {
+        episodes: fixedSplit(transcript, config),
+        fallbackReason: "AI 未识别到话题断点,已自动按等时切割",
+      };
+    }
+    return { episodes: smartSplit(transcript, breaks, config) };
   } catch (err) {
-    // 把 LLM 错误往上抛,让 UI 层决定是否回退
-    throw new Error(`智能分集失败: ${err instanceof Error ? err.message : String(err)}`);
+    // LLM 失败,回退等时切割,但告诉用户原因
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      episodes: fixedSplit(transcript, config),
+      fallbackReason: `AI 调用失败,已自动按等时切割。原因: ${reason}`,
+    };
   }
 }
