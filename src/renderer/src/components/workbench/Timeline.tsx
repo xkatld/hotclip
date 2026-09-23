@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getApi } from "../../api/provider";
 import { useT } from "../../i18n/store";
-import type { HighlightCandidate, TimelineData } from "../../../../shared/api-types";
+import type { EpisodeCandidate, HighlightCandidate, TimelineData } from "../../../../shared/api-types";
 
 function formatTick(sec: number): string {
   const s = Math.floor(sec);
@@ -43,6 +43,9 @@ export function Timeline({
   currentSec,
   onFocus,
   onSeek,
+  episodes,
+  episodeFocusedId,
+  onEpisodeFocus,
 }: {
   filePath: string | null;
   durationSec: number;
@@ -51,6 +54,9 @@ export function Timeline({
   currentSec: number;
   onFocus: (id: number) => void;
   onSeek: (sec: number) => void;
+  episodes?: EpisodeCandidate[] | null;
+  episodeFocusedId?: number | null;
+  onEpisodeFocus?: (id: number) => void;
 }): React.JSX.Element {
   const t = useT("workbench");
   const [data, setData] = useState<TimelineData | null>(null);
@@ -77,6 +83,8 @@ export function Timeline({
   const dmPath = useMemo(() => (data ? areaPath(data.danmaku, W, H) : ""), [data]);
   const ticks = useMemo(() => tickMarks(durationSec), [durationSec]);
   const frac = (sec: number): number => Math.min(1, Math.max(0, durationSec > 0 ? sec / durationSec : 0));
+  const episodeList = episodes ?? [];
+  const focusedEpisode = episodeList.find((ep) => ep.id === episodeFocusedId) ?? null;
 
   const seekFromEvent = (e: React.MouseEvent<HTMLDivElement>): void => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -118,6 +126,16 @@ export function Timeline({
           {motionPath && <path d={motionPath} fill="rgba(34,211,238,0.12)" stroke="rgba(34,211,238,0.72)" strokeWidth="1" />}
           {dmPath && <path d={dmPath} fill="rgba(244,114,182,0.18)" stroke="rgba(244,114,182,0.75)" strokeWidth="1" />}
         </svg>
+        {/* 分集:聚焦集的范围底纹 */}
+        {focusedEpisode && (
+          <div
+            className="pointer-events-none absolute top-0 bottom-0 bg-sky-400/10"
+            style={{
+              left: `${frac(focusedEpisode.startSec) * 100}%`,
+              width: `${Math.max(0.3, (frac(focusedEpisode.endSec) - frac(focusedEpisode.startSec)) * 100)}%`,
+            }}
+          />
+        )}
         {/* 候选段:落在曲线峰上的发光切口;判弃的暗一档虚线 */}
         {(candidates ?? []).map((c) => {
           const left = frac(c.startSec) * 100;
@@ -153,6 +171,32 @@ export function Timeline({
             </button>
           );
         })}
+        {/* 分集断点:每集起点的竖线,点一下跳到该集开头 */}
+        {episodeList.map((ep) => {
+          const focused = ep.id === episodeFocusedId;
+          return (
+            <button
+              key={`episode-${ep.id}`}
+              type="button"
+              title={`${ep.title} · ${Math.round(ep.durationSec)}s`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onEpisodeFocus?.(ep.id);
+                onSeek(ep.startSec);
+              }}
+              style={{ left: `${frac(ep.startSec) * 100}%` }}
+              className={`absolute top-0 bottom-0 w-[2px] ${focused ? "bg-sky-400" : "bg-sky-400/45 hover:bg-sky-400"}`}
+            >
+              <span
+                className={`absolute top-0 left-0 rounded-b px-1 text-[9px] font-extrabold ${
+                  focused ? "bg-sky-400 text-ink" : "bg-sky-400/60 text-ink"
+                }`}
+              >
+                {ep.id}
+              </span>
+            </button>
+          );
+        })}
         {/* 播放头 */}
         <div
           style={{ left: `${frac(currentSec) * 100}%` }}
@@ -179,6 +223,12 @@ export function Timeline({
           <span className="h-2 w-2 rounded-[3px] border border-ember/70" />
           {t("legendCandidate")}
         </span>
+        {episodeList.length > 0 && (
+          <span className="inline-flex items-center gap-1">
+            <span className="h-2 w-2 rounded-[3px] bg-sky-400/70" />
+            {t("legendEpisode")}
+          </span>
+        )}
       </div>
     </div>
   );

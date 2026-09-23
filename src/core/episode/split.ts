@@ -5,6 +5,7 @@
  *  - manual: 用户手动给的断点列表 → 集
  */
 import type { Transcript, EpisodeCandidate, EpisodeSplitConfig, EpisodeNumberFormat } from "../../shared/api-types";
+import { unwrapLlmBody } from "../llm-transport";
 
 /** LLM 返回的原始断点。 */
 export interface RawBreak {
@@ -14,25 +15,46 @@ export interface RawBreak {
   chapterTitle: string;
 }
 
-/** 从 LLM JSON 中提取断点列表。容忍各种格式偏差。 */
-export function parseBreaks(raw: string): RawBreak[] {
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return [];
-  try {
-    const obj = JSON.parse(match[0]);
-    const arr = Array.isArray(obj.breaks) ? obj.breaks : [];
-    return arr
-      .filter((b: Record<string, unknown>) => typeof b.timeSec === "number")
-      .map((b: Record<string, unknown>) => ({
-        segmentId: typeof b.segmentId === "number" ? b.segmentId : 0,
-        timeSec: b.timeSec as number,
-        reason: typeof b.reason === "string" ? b.reason : "",
-        chapterTitle: typeof b.chapterTitle === "string" ? b.chapterTitle : "",
-      }))
-      .sort((a: RawBreak, b: RawBreak) => a.timeSec - b.timeSec);
-  } catch {
-    return [];
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value.trim());
+    return Number.isFinite(n) ? n : null;
   }
+  return null;
+}
+
+/**
+ * 从模型正文里提取断点列表。先剥掉 OpenAI 响应信封再取 breaks:
+ * 直接把 HTTP 响应体当正文解析,贪心正则会把整个信封吃掉,顶层永远没有
+ * breaks 字段,断点恒为空——分集一直回退等时就是这一步。
+ * 解析不出结构一律抛错,交给 chatCompleteJson 重发一次,不静默返回空。
+ */
+export function parseBreaks(raw: string): RawBreak[] {
+  const body = unwrapLlmBody(raw);
+  const match = body.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error(`模型未返回 JSON 断点列表 / no JSON in response: ${body.slice(0, 200)}`);
+  let parsed: { breaks?: unknown };
+  try {
+    parsed = JSON.parse(match[0]) as { breaks?: unknown };
+  } catch {
+    throw new Error(`模型返回的断点列表不是合法 JSON / invalid JSON: ${match[0].slice(0, 200)}`);
+  }
+  if (!Array.isArray(parsed.breaks)) throw new Error("模型输出缺少 breaks 数组 / missing breaks array");
+  const out: RawBreak[] = [];
+  for (const item of parsed.breaks) {
+    if (typeof item !== "object" || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const timeSec = toFiniteNumber(row.timeSec);
+    if (timeSec === null) continue;
+    out.push({
+      segmentId: toFiniteNumber(row.segmentId) ?? 0,
+      timeSec,
+      reason: typeof row.reason === "string" ? row.reason : "",
+      chapterTitle: typeof row.chapterTitle === "string" ? row.chapterTitle : "",
+    });
+  }
+  return out.sort((a, b) => a.timeSec - b.timeSec);
 }
 
 /**

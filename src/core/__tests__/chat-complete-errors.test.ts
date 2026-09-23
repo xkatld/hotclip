@@ -3,7 +3,7 @@
  * 用户,只看到 fetch failed 是不知道下一步的——本地/云端要给不同的指引。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chatComplete, MAX_TOKENS, RETRY_MAX_TOKENS, thinkingParams } from "../highlight/detect";
+import { chatComplete, MAX_TOKENS, RETRY_MAX_TOKENS, thinkingParams } from "../llm-transport";
 
 const OLLAMA = { baseUrl: "http://localhost:11434/v1", apiKey: "", model: "qwen3:8b" };
 const CLOUD = { baseUrl: "https://api.atlascloud.ai/v1", apiKey: "sk-x", model: "qwen/qwen3.5-flash" };

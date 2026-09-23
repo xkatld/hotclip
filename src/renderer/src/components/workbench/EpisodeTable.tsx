@@ -19,7 +19,7 @@ function formatDuration(sec: number): string {
   return m > 0 ? `${m}分${s > 0 ? s + "秒" : ""}` : `${s}秒`;
 }
 
-export function EpisodeTable(): React.JSX.Element | null {
+export function EpisodeTable({ onSeek }: { onSeek?: (sec: number) => void }): React.JSX.Element | null {
   const t = useT("episode");
   const { episodes, episodeSelected, episodeFocusedId, toggleEpisodeSelected, setEpisodeFocusedId, patchEpisode } = useSession();
 
@@ -29,7 +29,7 @@ export function EpisodeTable(): React.JSX.Element | null {
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between px-1">
         <span className="text-[11px] font-bold text-mut">{t("resultTitle")}</span>
-        <span className="text-[10.5px] text-mut">{t("resultCount", { n: episodes.length })}</span>
+        <span className="text-[10.5px] text-mut">{t("resultCount", { n: episodes.length })} · {t("seekHint")}</span>
       </div>
       <div className="flex flex-col gap-0.5">
         {episodes.map((ep) => {
@@ -38,7 +38,10 @@ export function EpisodeTable(): React.JSX.Element | null {
           return (
             <div
               key={ep.id}
-              onClick={() => setEpisodeFocusedId(ep.id)}
+              onClick={() => {
+                setEpisodeFocusedId(ep.id);
+                onSeek?.(ep.startSec);
+              }}
               className={`flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer transition-colors ${
                 focused
                   ? "border-ember/60 bg-ember/5"
@@ -64,8 +67,11 @@ export function EpisodeTable(): React.JSX.Element | null {
                 <div className="mt-0.5 flex gap-3 text-[10.5px] text-mut tabular-nums">
                   <span>{formatTime(ep.startSec)} → {formatTime(ep.endSec)}</span>
                   <span>{formatDuration(ep.durationSec)}</span>
+                  <span className={ep.reason ? "text-sky-400/80" : "text-mut/60"}>
+                    {ep.reason ? t("fromAi") : t("fromFixed")}
+                  </span>
                 </div>
-                {ep.reason && <p className="mt-0.5 text-[10px] text-mut/60">{ep.reason}</p>}
+                {ep.reason && <p className="mt-0.5 text-[10px] text-mut/60">{t("epReason")}: {ep.reason}</p>}
               </div>
             </div>
           );

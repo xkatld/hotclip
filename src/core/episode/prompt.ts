@@ -17,7 +17,7 @@ export const EPISODE_SYSTEM_PROMPT_ZH = `你是一位专业视频分集编辑。
 
 【什么是分集断点】
 视频中话题/章节/知识点自然切换的时刻。典型信号：
-- 明确的过渡语���"好，接下来我们看…"、"下一个知识点是…"、"这部分就到这里"
+- 明确的过渡语:"好，接下来我们看…"、"下一个知识点是…"、"这部分就到这里"
 - 话题突然切换：前面讲A，后面开始讲完全不同的B
 - 明显的停顿或总结后开启新内容
 - 场景或演示切换
@@ -28,6 +28,9 @@ export const EPISODE_SYSTEM_PROMPT_ZH = `你是一位专业视频分集编辑。
 3. 为断点之后的章节生成一个简洁的标题（概括该段核心内容，不超过20字）
 4. 按视频时间顺序列出所有断点
 5. 不要强行凑数：如果这段内容就是一个连贯主题，可以返回空列表
+6. segmentId 用行首方括号里的编号原值，timeSec 用该句开头时间戳换算出的秒数（数字，可带一位小数），不要用字符串
+7. 相邻断点之间至少要间隔目标最短时长，太密的断点合并成一个
+8. 只输出 JSON 本体：不要 Markdown 代码块，不要任何解释文字
 
 【输出格式】严格 JSON：
 {
@@ -51,6 +54,9 @@ Moments where the topic/chapter/subject naturally transitions. Typical signals:
 3. Generate a concise chapter title for the section AFTER the break (≤10 words, summarizing core content)
 4. List all breaks in chronological order
 5. Don't pad: if this segment is one continuous topic, return an empty breaks array
+6. Use the number in the leading brackets as segmentId; timeSec is a number in seconds converted from that sentence's timestamp, never a string
+7. Keep at least the target minimum length between neighbouring breaks; merge breaks that are too close
+8. Output raw JSON only: no Markdown code fence, no prose
 
 【Output format】Strict JSON:
 {
@@ -86,8 +92,8 @@ export function buildWindowPrompt(
   });
 
   const header = zh
-    ? `这是一份 ${totalMin} 分钟视频的第 ${winStartMin}~${winEndMin} 分钟段落(共 ${segments.length} 句)。\n请找出这段内容中所有话题切换的断点,使每一集的时长尽量在 ${targetMin}~${targetMax} 分钟之间。\n只需要关注这段内容内部的断点,不要管视频其他部分。\n\n`
-    : `This is the ${winStartMin}–${winEndMin} minute segment of a ${totalMin}-minute video (${segments.length} sentences).\nFind all topic-transition break points within this segment so each episode is roughly ${targetMin}–${targetMax} minutes.\nFocus only on breaks within this segment.\n\n`;
+    ? `这是一份 ${totalMin} 分钟视频的第 ${winStartMin}~${winEndMin} 分钟段落(共 ${segments.length} 句)。\n每行格式: [全片句号] 时间戳 台词。\n请找出这段内容中所有话题切换的断点,使每一集的时长尽量在 ${targetMin}~${targetMax} 分钟之间。\n只需要关注这段内容内部的断点,不要管视频其他部分。\n\n`
+    : `This is the ${winStartMin}–${winEndMin} minute segment of a ${totalMin}-minute video (${segments.length} sentences).\nEach line is: [sentence id] timestamp text.\nFind all topic-transition break points within this segment so each episode is roughly ${targetMin}–${targetMax} minutes.\nFocus only on breaks within this segment.\n\n`;
 
   return header + lines.join("\n");
 }

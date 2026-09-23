@@ -3,7 +3,7 @@ import { parseBreaks, smartSplit, fixedSplit, manualSplit, snapToSentenceBoundar
 import type { Transcript, EpisodeSplitConfig } from "../../shared/api-types";
 import { EPISODE_SPLIT_DEFAULTS } from "../../shared/api-types";
 
-/** 简易逐句稿:每 60 秒一句,总时长 7200 秒(2 小时)�� */
+/** 简易逐句稿:每 60 秒一句,总时长 7200 秒(2 小时) */
 function makeLongTranscript(durationSec = 7200, intervalSec = 60): Transcript {
   const segments = [];
   for (let t = 0; t < durationSec; t += intervalSec) {
@@ -26,10 +26,43 @@ describe("parseBreaks", () => {
     expect(breaks[0].chapterTitle).toBe("第二章");
   });
 
-  it("returns empty on garbage input", () => {
-    expect(parseBreaks("not json at all")).toEqual([]);
-    expect(parseBreaks("{}")).toEqual([]);
-    expect(parseBreaks('{"breaks":"nope"}')).toEqual([]);
+  it("unwraps a raw OpenAI response envelope instead of reading the envelope itself", () => {
+    const body = JSON.stringify({
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      choices: [
+        {
+          index: 0,
+          finish_reason: "stop",
+          message: {
+            role: "assistant",
+            content: '{"breaks":[{"segmentId":42,"timeSec":723.5,"reason":"转入实战","chapterTitle":"实战演示"}]}',
+          },
+        },
+      ],
+    });
+    const breaks = parseBreaks(body);
+    expect(breaks).toHaveLength(1);
+    expect(breaks[0].timeSec).toBe(723.5);
+    expect(breaks[0].segmentId).toBe(42);
+    expect(breaks[0].chapterTitle).toBe("实战演示");
+  });
+
+  it("accepts numeric strings and drops rows without a usable time", () => {
+    const raw = '{"breaks":[{"timeSec":"600.5","chapterTitle":"A"},{"timeSec":"","chapterTitle":"B"},{"reason":"no time"}]}';
+    const breaks = parseBreaks(raw);
+    expect(breaks).toHaveLength(1);
+    expect(breaks[0].timeSec).toBe(600.5);
+  });
+
+  it("returns an empty list only when the model really reported no breaks", () => {
+    expect(parseBreaks('{"breaks":[]}')).toEqual([]);
+  });
+
+  it("throws on unparseable output so the caller can retry instead of silently falling back", () => {
+    expect(() => parseBreaks("not json at all")).toThrow();
+    expect(() => parseBreaks("{}")).toThrow();
+    expect(() => parseBreaks('{"breaks":"nope"}')).toThrow();
   });
 
   it("sorts by timeSec", () => {

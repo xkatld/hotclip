@@ -1,43 +1,56 @@
-/**
- * 分集检测编排器:转写结果 → 分窗口 LLM 识别话题断点 → 合并 → 分集候选列表。
- *
- * 核心策略(与爆款检测不同):
- * 两小时视频的逐句稿可能有数千句,一次 LLM 请求会超 token 上限甚至 524。
- * 因此采用**滑动窗口**:按 ~30 分钟切块,每块独立调 LLM 找断点,最后合并去重。
- * 窗口之间有 2 分钟重叠区,确保边界处的话题切换不被遗漏。
- */
 import type { Transcript, LlmConfig, EpisodeCandidate, EpisodeSplitConfig } from "../../shared/api-types";
 import { episodeSystemPrompt, buildWindowPrompt, isChineseTranscript } from "./prompt";
 import { parseBreaks, smartSplit, fixedSplit, resolveTargetInterval, type RawBreak } from "./split";
-import { requestLlmText, llmRequestBudget } from "../llm-transport";
-import { isLocalBaseUrl } from "../../shared/llm-preflight";
-import { extraParams, thinkingParams, MAX_TOKENS } from "../highlight/detect";
+import { chatCompleteJson } from "../llm-transport";
 
-/** 每个窗口约 30 分钟(秒)。 */
 const WINDOW_SEC = 30 * 60;
-/** 相邻窗口重叠 2 分钟,防止边界遗漏。 */
 const OVERLAP_SEC = 2 * 60;
 
-/** 把逐句稿按时间切成窗口。 */
-function splitWindows(transcript: Transcript): { startSec: number; endSec: number; segments: typeof transcript.segments }[] {
+interface WindowSegment {
+  id: number;
+  startSec: number;
+  endSec: number;
+  text: string;
+}
+
+interface Window {
+  startSec: number;
+  endSec: number;
+  segments: WindowSegment[];
+}
+
+/** 逐句稿带上全片序号:模型回填的 segmentId 必须能对回原片,不能用窗口内下标。 */
+function indexSegments(transcript: Transcript): WindowSegment[] {
+  return transcript.segments.map((s, i) => ({
+    id: Number.isFinite(s.id) ? s.id : i,
+    startSec: s.startSec,
+    endSec: s.endSec,
+    text: s.text,
+  }));
+}
+
+function splitWindows(transcript: Transcript): Window[] {
   const totalSec = transcript.durationSec;
   if (totalSec <= 0) return [];
-  const windows: { startSec: number; endSec: number; segments: typeof transcript.segments }[] = [];
+  const indexed = indexSegments(transcript);
+  const windows: Window[] = [];
   let cursor = 0;
   while (cursor < totalSec) {
     const winEnd = Math.min(cursor + WINDOW_SEC, totalSec);
-    const segs = transcript.segments.filter((s) => s.startSec >= cursor && s.startSec < winEnd + OVERLAP_SEC);
-    windows.push({ startSec: cursor, endSec: winEnd, segments: segs });
+    windows.push({
+      startSec: cursor,
+      endSec: winEnd,
+      segments: indexed.filter((s) => s.startSec >= cursor && s.startSec < winEnd + OVERLAP_SEC),
+    });
     cursor = winEnd;
   }
   return windows;
 }
 
-/** 对单个窗口调一次 LLM。 */
 async function detectWindow(
   llm: LlmConfig,
   systemPrompt: string,
-  windowSegs: Transcript['segments'],
+  segments: WindowSegment[],
   windowStart: number,
   windowEnd: number,
   totalDurationSec: number,
@@ -46,12 +59,8 @@ async function detectWindow(
   zh: boolean,
   signal?: AbortSignal
 ): Promise<RawBreak[]> {
-  const url = `${llm.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const timeoutMs = isLocalBaseUrl(llm.baseUrl) ? 180_000 : 90_000;
-  const budget = llmRequestBudget(timeoutMs);
-
   const userPrompt = buildWindowPrompt(
-    windowSegs,
+    segments,
     windowStart,
     windowEnd,
     totalDurationSec,
@@ -59,32 +68,11 @@ async function detectWindow(
     targetMaxSec,
     zh
   );
-
-  const res = await requestLlmText(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${llm.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: llm.model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.3,
-      max_tokens: MAX_TOKENS,
-      ...extraParams(llm.baseUrl),
-      ...thinkingParams(llm.model),
-    }),
-  }, { signal, budget });
-
-  return parseBreaks(res.text);
+  return chatCompleteJson(llm, systemPrompt, userPrompt, parseBreaks, signal);
 }
 
-/** 合并多个窗口的断点:去重(时间太近的合并)。 */
 function mergeBreaks(allBreaks: RawBreak[]): RawBreak[] {
-  const sorted = allBreaks.sort((a, b) => a.timeSec - b.timeSec);
+  const sorted = [...allBreaks].sort((a, b) => a.timeSec - b.timeSec);
   const merged: RawBreak[] = [];
   for (const b of sorted) {
     if (merged.length === 0 || b.timeSec - merged[merged.length - 1].timeSec >= 60) {
@@ -94,58 +82,37 @@ function mergeBreaks(allBreaks: RawBreak[]): RawBreak[] {
   return merged;
 }
 
-/** 分集结果,附带回退信息。 */
 export interface EpisodeDetectResult {
   episodes: EpisodeCandidate[];
   fallbackReason?: string;
 }
 
-/**
- * 智能分集:分窗口调 LLM → 合并断点 → 分集。
- * 单窗口失败不阻塞,只跳过;全部失败才回退等时。
- */
 export async function detectEpisodes(
   transcript: Transcript,
   llm: LlmConfig,
   config: EpisodeSplitConfig,
   signal?: AbortSignal
 ): Promise<EpisodeDetectResult> {
-  if (config.mode === "fixed") {
-    return { episodes: fixedSplit(transcript, config) };
-  }
-  // 智能模式的兜底切割统一用目标范围中点,不与等时模式的独立间隔混用
+  if (config.mode === "fixed") return { episodes: fixedSplit(transcript, config) };
+  if (config.mode === "manual") return { episodes: [] };
+
   const fallbackInterval = resolveTargetInterval(config);
-  if (config.mode === "manual") {
-    return { episodes: [] };
+  const fallback = (reason: string): EpisodeDetectResult => ({
+    episodes: fixedSplit(transcript, config, fallbackInterval),
+    fallbackReason: reason,
+  });
+
+  if (transcript.durationSec <= 0 || transcript.segments.length === 0) {
+    return fallback("逐句稿为空,无法识别话题断点,已按目标时长范围自动切割");
   }
 
-  // smart 模式:分窗口
   const zh = isChineseTranscript(transcript);
   const systemPrompt = episodeSystemPrompt(transcript);
   const windows = splitWindows(transcript);
-
-  // 短视频(≤35分钟)不分窗口,一次搞定
-  if (windows.length <= 1) {
-    try {
-      const breaks = await detectWindow(
-        llm, systemPrompt, transcript.segments,
-        0, transcript.durationSec, transcript.durationSec,
-        config.targetMinSec, config.targetMaxSec, zh, signal
-      );
-      if (breaks.length === 0) {
-        return {
-          episodes: fixedSplit(transcript, config, fallbackInterval),
-          fallbackReason: "AI 未识别到话题断点,已按目标时长范围自动切割",        };
-      }
-      return { episodes: smartSplit(transcript, breaks, config) };
-    } catch (err) {
-      return {
-        episodes: fixedSplit(transcript, config, fallbackInterval),
-        fallbackReason: `AI 调用失败,已按目标时长范围自动切割。原因: ${err instanceof Error ? err.message : String(err)}`,      };
-    }
+  if (windows.length === 0) {
+    return fallback("逐句稿为空,无法识别话题断点,已按目标时长范围自动切割");
   }
 
-  // 长视频:逐窗口调 LLM,收集所有断点
   const allBreaks: RawBreak[] = [];
   const errors: string[] = [];
 
@@ -154,33 +121,38 @@ export async function detectEpisodes(
     const w = windows[i];
     try {
       const breaks = await detectWindow(
-        llm, systemPrompt, w.segments,
-        w.startSec, w.endSec, transcript.durationSec,
-        config.targetMinSec, config.targetMaxSec, zh, signal
+        llm,
+        systemPrompt,
+        w.segments,
+        w.startSec,
+        w.endSec,
+        transcript.durationSec,
+        config.targetMinSec,
+        config.targetMaxSec,
+        zh,
+        signal
       );
       allBreaks.push(...breaks);
     } catch (err) {
-      errors.push(`窗口${i + 1}(${Math.round(w.startSec / 60)}-${Math.round(w.endSec / 60)}分): ${err instanceof Error ? err.message : String(err)}`);
+      if (signal?.aborted) throw err;
+      const at = `${Math.round(w.startSec / 60)}-${Math.round(w.endSec / 60)} 分`;
+      errors.push(`第 ${i + 1} 段 ${at}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  if (allBreaks.length === 0) {
-    // 所有窗口都失败了
-    return {
-      episodes: fixedSplit(transcript, config, fallbackInterval),
-      fallbackReason: errors.length > 0
-        ? `AI 全部窗口失败,已按目标时长范围自动切割。错误: ${errors[0]}`
-        : "AI 未识别到话题断点,已按目标时长范围自动切割",    };
+  if (errors.length === windows.length) {
+    return fallback(`AI 调用失败,已按目标时长范围自动切割。原因: ${errors[0]}`);
   }
 
   const merged = mergeBreaks(allBreaks);
-  const episodes = smartSplit(transcript, merged, config);
+  if (merged.length === 0) {
+    return fallback("AI 判断整段内容是同一个话题,没有可用的章节断点,已按目标时长范围自动切割");
+  }
 
   return {
-    episodes,
-    // 部分窗口失败时提示
+    episodes: smartSplit(transcript, merged, config),
     fallbackReason: errors.length > 0
-      ? `${windows.length} 个窗口中 ${errors.length} 个AI调用失败,结果可能不完整`
+      ? `${windows.length} 段中有 ${errors.length} 段 AI 调用失败,结果可能不完整: ${errors[0]}`
       : undefined,
   };
 }

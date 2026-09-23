@@ -10,6 +10,14 @@ import type { EpisodeMode, EpisodeNumberFormat, EpisodeCandidate } from "../../.
 
 const NUMBER_FORMATS: EpisodeNumberFormat[] = ["P{n}", "第{n}集", "{n}", "{nn}"];
 
+function formatClock(sec: number): string {
+  const s = Math.floor(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
 export function EpisodeParams(): React.JSX.Element {
   const t = useT("episode");
   const {
@@ -33,6 +41,10 @@ export function EpisodeParams(): React.JSX.Element {
   const prefix = episodeConfig.titlePrefix;
   const numFmt = episodeConfig.numberFormat;
   const srtFile = episodeConfig.srtFile;
+  const parsedChars = transcript ? transcript.segments.reduce((n, s) => n + s.text.length, 0) : 0;
+  const estimateCount = transcript && transcript.durationSec > 0
+    ? Math.max(1, Math.round(transcript.durationSec / Math.max(60, (episodeConfig.targetMinSec + episodeConfig.targetMaxSec) / 2)))
+    : 0;
 
   const canStart = !!transcript && !episodeDetecting;
 
@@ -53,7 +65,7 @@ export function EpisodeParams(): React.JSX.Element {
         debugLog("[分集] 智能模式: 调用 episodeDetect...");
         const result = await getApi().episodeDetect({ transcript, llm: llmConfig, config: cfg });
         episodes = result.episodes;
-        debugLog(`[分集] 检测完成: ${episodes.length} �� (${Date.now() - t0}ms)`);
+        debugLog(`[分集] 检测完成: ${episodes.length} 集 (${Date.now() - t0}ms)`);
         if (result.fallbackReason) {
           debugWarn(`[分集] 回退: ${result.fallbackReason}`);
           setWarning(result.fallbackReason);
@@ -64,7 +76,7 @@ export function EpisodeParams(): React.JSX.Element {
           try {
             episodes = await getApi().episodeTitles({ transcript, episodes, config: cfg, llm: llmConfig });
             debugSuccess(`[分集] 标题生成完成 (${Date.now() - t1}ms)`);
-            episodes.forEach((ep) => debugLog(`  ${ep.id}: ${ep.title}`));
+            episodes.forEach((ep) => debugLog(`  ${ep.id}: ${ep.title} [${formatClock(ep.startSec)} → ${formatClock(ep.endSec)}]${ep.reason ? ` ${ep.reason}` : ""}`));
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             debugWarn(`[分集] 标题生成失败: ${msg}`);
@@ -101,6 +113,18 @@ export function EpisodeParams(): React.JSX.Element {
   return (
     <div className="flex flex-col gap-3.5">
       <p className="text-[12.5px] leading-relaxed text-mut">{t("desc")}</p>
+
+      <div className="flex flex-col gap-1 rounded-lg border border-line/60 bg-panel-2/50 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-mut tabular-nums">
+          <span className="font-bold text-fg/80">{t("parsedSource")}</span>
+          <span>{t("parsedDuration")} {formatClock(transcript.durationSec)}</span>
+          <span>{t("parsedSegments")} {transcript.segments.length}</span>
+          <span>{t("parsedChars")} {parsedChars}</span>
+          <span>{t("parsedEngine")} {transcript.engine}</span>
+          <span>{t("parsedLang")} {transcript.language}</span>
+        </div>
+        <span className="text-[10px] text-mut/70">{t("parsedHint", { n: estimateCount })}</span>
+      </div>
 
       <Segmented<EpisodeMode>
         value={mode}

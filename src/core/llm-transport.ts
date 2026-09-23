@@ -1,3 +1,6 @@
+import type { LlmConfig } from "../shared/api-types";
+import { isLocalBaseUrl } from "../shared/llm-preflight";
+
 /** 模型 HTTP 请求的边界：总时限、可取消等待、有限重试和响应体上限。 */
 export const LLM_REMOTE_TIMEOUT_MS = 180_000;
 export const LLM_LOCAL_TIMEOUT_MS = 300_000;
@@ -114,4 +117,179 @@ export function modelErrorDetail(text: string, apiKey: string, maxLength = 300):
   } catch { /* 非 JSON 错误仍保留有界诊断。 */ }
   if (apiKey) detail = detail.split(apiKey).join("[redacted]");
   return detail.replace(/Bearer\s+[^\s"'<>]+/gi, "Bearer [redacted]").slice(0, maxLength);
+}
+
+export const MAX_TOKENS = 4000;
+export const RETRY_MAX_TOKENS = 16000;
+export const JSON_ATTEMPTS = 2;
+
+export function extraParams(baseUrl: string): Record<string, unknown> {
+  return /pollinations\.ai/i.test(baseUrl) ? { reasoning_effort: "low" } : {};
+}
+
+export function thinkingParams(model: string): Record<string, unknown> {
+  return /(?:^|[/:-])qwen3(?:[.:-]|$)|(?:^|[/:-])qwq(?:[.:-]|$)/i.test(model)
+    ? { enable_thinking: false }
+    : {};
+}
+
+export interface ChatAttempt {
+  content: string;
+  reasoning: string;
+  finishReason: string;
+}
+
+interface ChatEnvelope {
+  choices?: Array<{
+    finish_reason?: string;
+    text?: string;
+    message?: {
+      content?: string | Array<{ text?: unknown }>;
+      reasoning_content?: string;
+      reasoning?: string;
+    };
+  }>;
+}
+
+export function readChatEnvelope(text: string): ChatAttempt | null {
+  let data: ChatEnvelope;
+  try {
+    data = JSON.parse(text) as ChatEnvelope;
+  } catch {
+    return null;
+  }
+  const choice = data?.choices?.[0];
+  const message = choice?.message;
+  const content = Array.isArray(message?.content)
+    ? message.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("")
+    : typeof message?.content === "string"
+      ? message.content
+      : typeof choice?.text === "string"
+        ? choice.text
+        : "";
+  const reasoning =
+    (typeof message?.reasoning_content === "string" && message.reasoning_content) ||
+    (typeof message?.reasoning === "string" && message.reasoning) ||
+    "";
+  return {
+    content: content.trim(),
+    reasoning: reasoning.trim(),
+    finishReason: String(choice?.finish_reason ?? ""),
+  };
+}
+
+export function unwrapLlmBody(text: string): string {
+  const envelope = readChatEnvelope(text);
+  return envelope && envelope.content ? envelope.content : text;
+}
+
+async function chatAttempt(
+  llm: LlmConfig,
+  system: string,
+  user: string,
+  signal: AbortSignal | undefined,
+  maxTokens: number,
+  budget: LlmRequestBudget,
+  includeThinkingParam = true
+): Promise<ChatAttempt> {
+  const url = `${llm.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  let res: Awaited<ReturnType<typeof requestLlmText>>;
+  try {
+    res = await requestLlmText(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${llm.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: llm.model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        temperature: 0.6,
+        max_tokens: maxTokens,
+        ...extraParams(llm.baseUrl),
+        ...(includeThinkingParam ? thinkingParams(llm.model) : {}),
+      }),
+    }, { signal, budget });
+  } catch (e) {
+    signal?.throwIfAborted();
+    if (e instanceof LlmTransportError) throw e;
+    const hint = isLocalBaseUrl(llm.baseUrl)
+      ? "本机 LLM 服务没有响应:若用 Ollama,请先到 ollama.com 安装并启动,再运行 ollama pull 拉取模型;或点「连接 AI 模型」换云端供应商,填 API Key 即用。/ Local LLM not responding: install & start Ollama (ollama.com) and pull the model, or switch to a cloud provider with an API key."
+      : "请检查网络连接,并确认 Base URL 填写正确。/ Check your network and verify the Base URL.";
+    throw new Error(`无法连接 LLM 服务 / cannot reach LLM endpoint\n${hint}`);
+  }
+  const text = res.text;
+  if (!res.ok) {
+    const retryWait = retryAfterMs(res.headers.get("retry-after"));
+    const hint = isLocalBaseUrl(llm.baseUrl) && res.status === 404
+      ? `\n本机可能还没拉取这个模型:先运行 ollama pull ${llm.model} / model likely not pulled yet: run ollama pull ${llm.model}`
+      : res.status === 429 || res.status === 503
+        ? retryWait !== null && retryWait > 0
+          ? `\n服务商建议等待 ${Math.ceil(retryWait / 1000)} 秒后重试。/ Retry after ${Math.ceil(retryWait / 1000)} seconds.`
+          : "\n服务暂时不可用或额度受限，请稍后重试并检查服务状态与额度。/ Check service availability and quota, then retry later."
+        : "";
+    throw new Error(`LLM 请求失败 / LLM request failed (HTTP ${res.status}): ${modelErrorDetail(text, llm.apiKey)}${hint}`);
+  }
+  const envelope = readChatEnvelope(text);
+  if (!envelope) throw new Error("LLM 返回非 JSON 响应，请检查 Base URL。/ Non-JSON response; check the Base URL.");
+  return envelope;
+}
+
+export async function chatComplete(llm: LlmConfig, system: string, user: string, signal?: AbortSignal): Promise<string> {
+  const budget = llmRequestBudget(isLocalBaseUrl(llm.baseUrl) ? LLM_LOCAL_TIMEOUT_MS : LLM_REMOTE_TIMEOUT_MS, 1);
+  let includeThinkingParam = Object.keys(thinkingParams(llm.model)).length > 0;
+  let first: ChatAttempt;
+  try {
+    first = await chatAttempt(llm, system, user, signal, MAX_TOKENS, budget, includeThinkingParam);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (!includeThinkingParam || !/HTTP 400/i.test(message) || !/thinking|unknown parameter|unsupported/i.test(message)) throw e;
+    includeThinkingParam = false;
+    first = await chatAttempt(llm, system, user, signal, MAX_TOKENS, budget, false);
+  }
+  if (first.content) return first.content;
+  if (first.reasoning && first.finishReason !== "length") return first.reasoning;
+  let retry: ChatAttempt | null = null;
+  try {
+    retry = await chatAttempt(llm, system, user, signal, RETRY_MAX_TOKENS, budget, includeThinkingParam);
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    if (e instanceof LlmTransportError) throw e;
+  }
+  if (retry?.content) return retry.content;
+  if (retry?.reasoning && retry.finishReason !== "length") return retry.reasoning;
+  const filtered = first.finishReason === "content_filter" || retry?.finishReason === "content_filter";
+  const thinking =
+    Boolean(first.reasoning || retry?.reasoning) ||
+    first.finishReason === "length" ||
+    retry?.finishReason === "length";
+  const hint = filtered
+    ? "内容被服务商的安全审查拦截了,请换一家供应商或换一段素材。/ Blocked by the provider's content filter — try another provider or different footage."
+    : thinking
+      ? "当前模型是「深度思考」模型,思考过程就把输出预算烧完了。请在模型列表换它的非思考版本(通常带 instruct/chat 字样,或平台上可关闭深度思考),或换常规对话模型。/ This is a reasoning model that spends the whole output budget thinking — switch to its non-thinking variant (usually named instruct/chat) or a regular chat model."
+      : "服务商返回了空内容,可点重试;若持续出现请换个模型。/ The provider returned empty content — retry, or switch models if it persists.";
+  throw new Error(`LLM 未返回内容 / empty LLM response\n${hint}`);
+}
+
+export async function chatCompleteJson<T>(
+  llm: LlmConfig,
+  system: string,
+  user: string,
+  parse: (content: string) => T,
+  signal?: AbortSignal
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < JSON_ATTEMPTS; i++) {
+    const content = await chatComplete(llm, system, user, signal);
+    try {
+      return parse(content);
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }

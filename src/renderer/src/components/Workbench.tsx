@@ -370,26 +370,40 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
                 >{label}</button>
               ))}
             </div>
+            <PreviewPane
+              filePath={file.path}
+              durationSec={durationSec}
+              seekSec={seekSec}
+              onTime={(sec) => {
+                currentSecRef.current = sec;
+                setCurrentSec(sec);
+              }}
+              onPrevCandidate={() => stepCandidate(-1)}
+              onNextCandidate={() => stepCandidate(1)}
+              compact={session.workMode === "clip" && tab === "transcript"}
+              transportCommand={transportCommand}
+            />
             {session.workMode === "episode" && (
-              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                <EpisodeParams />
-                <EpisodeTable />
-              </div>
+              <>
+                <Timeline
+                  filePath={file.path}
+                  durationSec={durationSec}
+                  candidates={null}
+                  focusedId={null}
+                  currentSec={currentSec}
+                  onFocus={() => {}}
+                  onSeek={seek}
+                  episodes={session.episodes}
+                  episodeFocusedId={session.episodeFocusedId}
+                  onEpisodeFocus={session.setEpisodeFocusedId}
+                />
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <EpisodeParams />
+                  <EpisodeTable onSeek={seek} />
+                </div>
+              </>
             )}
             <div style={session.workMode !== "clip" ? {display:"none"} : undefined} className="contents">
-              <PreviewPane
-                filePath={file.path}
-                durationSec={durationSec}
-                seekSec={seekSec}
-                onTime={(sec) => {
-                  currentSecRef.current = sec;
-                  setCurrentSec(sec);
-                }}
-                onPrevCandidate={() => stepCandidate(-1)}
-                onNextCandidate={() => stepCandidate(1)}
-                compact={tab === "transcript"}
-                transportCommand={transportCommand}
-              />
               {(tab !== "transcript" || showTranscriptTimeline) && <Timeline
                 filePath={file.path}
                 durationSec={durationSec}
