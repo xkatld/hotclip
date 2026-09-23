@@ -21,7 +21,9 @@ import type {
   SessionCheckpoint,
   SessionEditCommand,
   SessionEditHistory,
+  EpisodeSplitConfig,
 } from "../../../shared/api-types";
+import { EPISODE_SPLIT_DEFAULTS } from "../../../shared/api-types";
 import { appendSessionEdit, compactSessionEditHistory, emptySessionEditHistory } from "../../../shared/session-edit-history";
 
 export interface ProbedFile extends MediaInfo {
@@ -83,6 +85,7 @@ interface SessionState {
   episodeFocusedId: number | null;
   episodeDetecting: boolean;
   episodeExporting: boolean;
+  episodeConfig: EpisodeSplitConfig;
 
   setFile: (file: ProbedFile | null) => void;
   setTranscript: (t: Transcript | null) => void;
@@ -112,6 +115,7 @@ interface SessionState {
   setEpisodeDetecting: (v: boolean) => void;
   setEpisodeExporting: (v: boolean) => void;
   patchEpisode: (id: number, patch: Partial<import("../../../shared/api-types").EpisodeCandidate>) => void;
+  setEpisodeConfig: (patch: Partial<EpisodeSplitConfig>) => void;
   /** 从已验证的磁盘检查点恢复稳定字段，并把所有瞬态重置为空闲。 */
   restore: (checkpoint: SessionCheckpoint) => void;
   /** 换素材/重开:回到导入态,清空一切会话状态。 */
@@ -131,6 +135,7 @@ export const useSession = create<SessionState>((set, get) => ({
   episodeFocusedId: null,
   episodeDetecting: false,
   episodeExporting: false,
+  episodeConfig: { ...EPISODE_SPLIT_DEFAULTS },
   focusedId: null,
   detecting: false,
   detectError: null,
@@ -245,6 +250,7 @@ export const useSession = create<SessionState>((set, get) => ({
     if (!eps) return;
     set({ episodes: eps.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
   },
+  setEpisodeConfig: (patch) => set({ episodeConfig: { ...get().episodeConfig, ...patch } }),
   reset: () =>
     set({
       file: null,
@@ -261,6 +267,12 @@ export const useSession = create<SessionState>((set, get) => ({
       paramsDirty: false,
       exporting: null,
       editHistory: emptySessionEditHistory(),
+      episodes: null,
+      episodeSelected: new Set<number>(),
+      episodeFocusedId: null,
+      episodeDetecting: false,
+      episodeExporting: false,
+      episodeConfig: { ...EPISODE_SPLIT_DEFAULTS },
     }),
 }));
 

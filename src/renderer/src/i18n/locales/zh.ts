@@ -868,6 +868,7 @@ export const zh = {
     exportBarInfo: "已选 {n}/{total} 集  总时长 {duration}",
     min: "分钟",
     noTranscript: "请先完成转写,再使用分集功能",
+    openFolder: "打开文件夹",
   },
 } as const;
 

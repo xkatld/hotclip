@@ -864,5 +864,6 @@ export const en = {
     exportBarInfo: "Selected {n}/{total} episodes  Total {duration}",
     min: "min",
     noTranscript: "Please complete transcription before using episode split",
+    openFolder: "Open folder",
   },
 } as const;

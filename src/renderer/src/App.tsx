@@ -30,6 +30,7 @@ import { WatchFolderModal } from "./components/WatchFolderModal";
 import { ProjectLibraryModal } from "./components/ProjectLibraryModal";
 import type { ProjectSummary, UpdateInfo, UrlImportProgressEvent } from "../../shared/api-types";
 import "./app.css";
+import { useDebugStore } from "./stores/debug-store";
 
 function displayName(path: string): string {
   const base = path.split(/[\\/]/).pop() ?? path;
@@ -278,6 +279,7 @@ export default function App(): React.JSX.Element {
   const th = useT("home");
   const tp = useT("projects");
   const { locale, setLocale } = useLocaleStore();
+  const debugStore = useDebugStore();
   const session = useSession();
   const { file, transcript, candidates, detecting, exporting, settingsOpen, auto } = session;
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
@@ -567,6 +569,14 @@ export default function App(): React.JSX.Element {
           >
             <LuLanguages className="h-3.5 w-3.5" />
             {REGISTRY[nextLocale].label}
+          </button>
+          <button
+            type="button"
+            onClick={() => debugStore.toggleVisible()}
+            title="Debug"
+            className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition-colors ${debugStore.visible ? "border-ember/50 bg-ember/10 text-ember" : "border-line text-mut hover:border-mut hover:text-fg"}`}
+          >
+            Debug
           </button>
         </div>
       </header>

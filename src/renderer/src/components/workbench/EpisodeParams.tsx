@@ -1,6 +1,3 @@
-/**
- * 分集参数面板:模式选择 + 时长范围 + 标题模板 + 导出选项 + 开始按钮。
- */
 import { useState } from "react";
 import { LuLoaderCircle, LuScissors } from "react-icons/lu";
 import { useT } from "../../i18n/store";
@@ -8,25 +5,34 @@ import { useSession } from "../../stores/session-store";
 import { useLlmStore } from "../../stores/llm-store";
 import { getApi } from "../../api/provider";
 import { Segmented, SwitchRow } from "../ui";
+import { debugLog, debugError, debugSuccess, debugWarn } from "../../stores/debug-store";
 import type { EpisodeMode, EpisodeNumberFormat, EpisodeCandidate } from "../../../../shared/api-types";
-import { EPISODE_SPLIT_DEFAULTS } from "../../../../shared/api-types";
 
 const NUMBER_FORMATS: EpisodeNumberFormat[] = ["P{n}", "第{n}集", "{n}", "{nn}"];
 
 export function EpisodeParams(): React.JSX.Element {
   const t = useT("episode");
-  const { transcript, episodeDetecting, setEpisodes, setEpisodeDetecting, setEpisodeSelected } = useSession();
+  const {
+    transcript,
+    episodeDetecting,
+    episodeConfig,
+    setEpisodes,
+    setEpisodeDetecting,
+    setEpisodeSelected,
+    setEpisodeConfig,
+  } = useSession();
   const { config: llmConfig } = useLlmStore();
 
-  const [mode, setMode] = useState<EpisodeMode>("smart");
-  const [minMin, setMinMin] = useState(10);
-  const [maxMin, setMaxMin] = useState(20);
-  const [intervalMin, setIntervalMin] = useState(15);
-  const [prefix, setPrefix] = useState("");
-  const [numFmt, setNumFmt] = useState<EpisodeNumberFormat>("P{n}");
-  const [srtFile, setSrtFile] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+
+  const mode = episodeConfig.mode;
+  const minMin = Math.round(episodeConfig.targetMinSec / 60);
+  const maxMin = Math.round(episodeConfig.targetMaxSec / 60);
+  const intervalMin = Math.round((episodeConfig.fixedIntervalSec ?? 900) / 60);
+  const prefix = episodeConfig.titlePrefix;
+  const numFmt = episodeConfig.numberFormat;
+  const srtFile = episodeConfig.srtFile;
 
   const canStart = !!transcript && !episodeDetecting;
 
@@ -35,46 +41,53 @@ export function EpisodeParams(): React.JSX.Element {
     setEpisodeDetecting(true);
     setError(null);
     setWarning(null);
+    debugLog(`[分集] 开始检测 mode=${mode} range=${minMin}~${maxMin}min`);
+    debugLog(`[分集] LLM: ${llmConfig.model} @ ${llmConfig.baseUrl}`);
+    const t0 = Date.now();
     try {
-      const cfg = {
-        ...EPISODE_SPLIT_DEFAULTS,
-        mode,
-        targetMinSec: minMin * 60,
-        targetMaxSec: maxMin * 60,
-        fixedIntervalSec: intervalMin * 60,
-        titlePrefix: prefix,
-        numberFormat: numFmt,
-        srtFile,
-      };
+      const cfg = episodeConfig;
 
       let episodes: EpisodeCandidate[];
 
       if (mode === "smart") {
-        // 智能模式: LLM 识别断点 → 分集(超时自动回退等时)
+        debugLog("[分集] 智能模式: 调用 episodeDetect...");
         const result = await getApi().episodeDetect({ transcript, llm: llmConfig, config: cfg });
         episodes = result.episodes;
+        debugLog(`[分集] 检测完成: ${episodes.length} �� (${Date.now() - t0}ms)`);
         if (result.fallbackReason) {
+          debugWarn(`[分集] 回退: ${result.fallbackReason}`);
           setWarning(result.fallbackReason);
         }
-        // AI 生成每集标题(失败不阻塞)
         if (episodes.length > 0) {
+          debugLog("[分集] 调用 episodeTitles 生成标题...");
+          const t1 = Date.now();
           try {
             episodes = await getApi().episodeTitles({ transcript, episodes, config: cfg, llm: llmConfig });
-          } catch { /* title generation is optional */ }
+            debugSuccess(`[分集] 标题生成完成 (${Date.now() - t1}ms)`);
+            episodes.forEach((ep) => debugLog(`  ${ep.id}: ${ep.title}`));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            debugWarn(`[分集] 标题生成失败: ${msg}`);
+          }
         }
       } else if (mode === "fixed") {
+        debugLog("[分集] 等时模式: 调用 episodeSplitFixed...");
         episodes = await getApi().episodeSplitFixed({ transcript, config: cfg });
+        debugLog(`[分集] 等时切割完成: ${episodes.length} 集`);
       } else {
         episodes = [];
+        debugLog("[分集] 手动模式: 等待用户标记");
       }
 
       setEpisodes(episodes);
       if (episodes.length > 0) {
         setEpisodeSelected(new Set(episodes.map((ep) => ep.id)));
+        debugSuccess(`[分集] 完成, 共 ${episodes.length} 集, 总耗时 ${Date.now() - t0}ms`);
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("Episode detect failed:", msg);
+      debugError(`[分集] 失败: ${msg}`);
       setError(msg);
     } finally {
       setEpisodeDetecting(false);
@@ -96,18 +109,18 @@ export function EpisodeParams(): React.JSX.Element {
           { value: "fixed", label: t("modeFixed"), title: t("modeFixedHint") },
           { value: "manual", label: t("modeManual"), title: t("modeManualHint") },
         ]}
-        onChange={setMode}
+        onChange={(v) => setEpisodeConfig({ mode: v })}
       />
 
       <div className="flex flex-col gap-1">
         <span className="text-[11px] font-semibold text-mut">{t("targetRange")}</span>
         <div className="flex items-center gap-2">
           <input type="number" min={1} max={120} value={minMin}
-            onChange={(e) => setMinMin(Math.max(1, Number(e.target.value)))}
+            onChange={(e) => setEpisodeConfig({ targetMinSec: Math.max(1, Number(e.target.value)) * 60 })}
             className="w-16 rounded-lg border border-line bg-panel-2 px-2 py-1.5 text-center text-[12px] outline-none focus:border-ember/60" />
           <span className="text-[11px] text-mut">~</span>
           <input type="number" min={1} max={120} value={maxMin}
-            onChange={(e) => setMaxMin(Math.max(1, Number(e.target.value)))}
+            onChange={(e) => setEpisodeConfig({ targetMaxSec: Math.max(1, Number(e.target.value)) * 60 })}
             className="w-16 rounded-lg border border-line bg-panel-2 px-2 py-1.5 text-center text-[12px] outline-none focus:border-ember/60" />
           <span className="text-[11px] text-mut">{t("min")}</span>
         </div>
@@ -118,7 +131,7 @@ export function EpisodeParams(): React.JSX.Element {
           <span className="text-[11px] font-semibold text-mut">{t("fixedInterval")}</span>
           <div className="flex items-center gap-2">
             <input type="number" min={1} max={120} value={intervalMin}
-              onChange={(e) => setIntervalMin(Math.max(1, Number(e.target.value)))}
+              onChange={(e) => setEpisodeConfig({ fixedIntervalSec: Math.max(1, Number(e.target.value)) * 60 })}
               className="w-16 rounded-lg border border-line bg-panel-2 px-2 py-1.5 text-center text-[12px] outline-none focus:border-ember/60" />
             <span className="text-[11px] text-mut">{t("min")}</span>
           </div>
@@ -127,7 +140,7 @@ export function EpisodeParams(): React.JSX.Element {
 
       <div className="flex flex-col gap-1">
         <span className="text-[11px] font-semibold text-mut">{t("titlePrefix")}</span>
-        <input value={prefix} onChange={(e) => setPrefix(e.target.value)}
+        <input value={prefix} onChange={(e) => setEpisodeConfig({ titlePrefix: e.target.value })}
           placeholder={t("titlePrefixPlaceholder")}
           className="w-full rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[12px] outline-none focus:border-ember/60" />
       </div>
@@ -137,10 +150,10 @@ export function EpisodeParams(): React.JSX.Element {
         <Segmented<EpisodeNumberFormat>
           value={numFmt}
           options={NUMBER_FORMATS.map((f) => ({ value: f, label: f.replace("{n}", "1").replace("{nn}", "01") }))}
-          onChange={setNumFmt} />
+          onChange={(v) => setEpisodeConfig({ numberFormat: v })} />
       </div>
 
-      <SwitchRow label={t("optSrt")} on={srtFile} onToggle={() => setSrtFile(!srtFile)} />
+      <SwitchRow label={t("optSrt")} on={srtFile} onToggle={() => setEpisodeConfig({ srtFile: !srtFile })} />
 
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-400">{error}</div>

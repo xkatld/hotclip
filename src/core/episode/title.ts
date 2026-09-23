@@ -1,15 +1,10 @@
-/**
- * 分集标题生成:LLM 根据每集的逐句稿内容批量生成标题。
- * 也支持纯模板模式(不调 LLM,只用序号 + 用户前缀)。
- */
-import type { Transcript, LlmConfig, EpisodeCandidate, EpisodeSplitConfig, EpisodeNumberFormat } from "../../shared/api-types";
+import type { Transcript, LlmConfig, EpisodeCandidate, EpisodeSplitConfig } from "../../shared/api-types";
 import { formatEpisodeNumber, applyTitleTemplate } from "./split";
 import { isChineseTranscript } from "./prompt";
 import { requestLlmText, llmRequestBudget } from "../llm-transport";
 import { isLocalBaseUrl } from "../../shared/llm-preflight";
 import { extraParams, thinkingParams } from "../highlight/detect";
 
-/** 为��集生成摘要标题(批量一次 LLM 调用)。 */
 async function generateTitlesViaLlm(
   transcript: Transcript,
   episodes: EpisodeCandidate[],
@@ -21,7 +16,6 @@ async function generateTitlesViaLlm(
 
   const blocks = episodes.map((ep) => {
     const epSegs = segs.filter((s) => s.startSec >= ep.startSec && s.endSec <= ep.endSec);
-    // 取前 8 句 + 后 4 句作为摘要依据
     const sample = [...epSegs.slice(0, 8), ...epSegs.slice(-4)].map((s) => s.text).join(" ");
     return `[集 ${ep.id}] ${sample.slice(0, 500)}`;
   });
@@ -33,8 +27,8 @@ async function generateTitlesViaLlm(
   const user = blocks.join("\n\n");
 
   const url = `${llm.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const timeout = isLocalBaseUrl(llm.baseUrl) ? 120_000 : 60_000;
-  const budget = llmRequestBudget(1);
+  const timeoutMs = isLocalBaseUrl(llm.baseUrl) ? 120_000 : 60_000;
+  const budget = llmRequestBudget(timeoutMs);
 
   const res = await requestLlmText(url, {
     method: "POST",
@@ -63,10 +57,6 @@ async function generateTitlesViaLlm(
   }
 }
 
-/**
- * 为分集候选列表填充完整标题:先尝试 LLM 生成,失败用默认标题。
- * 返回带有格式化标题的新列表(不修改原数组)。
- */
 export async function enrichEpisodeTitles(
   transcript: Transcript,
   episodes: EpisodeCandidate[],
@@ -74,13 +64,11 @@ export async function enrichEpisodeTitles(
   llm?: LlmConfig,
   signal?: AbortSignal
 ): Promise<EpisodeCandidate[]> {
-  // 尝试用 LLM 生成标题
   let aiTitles: string[] = [];
   if (llm) {
     try {
       aiTitles = await generateTitlesViaLlm(transcript, episodes, llm, signal);
     } catch {
-      // fail-open: 用既有标题
     }
   }
 

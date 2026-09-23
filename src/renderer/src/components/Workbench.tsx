@@ -23,6 +23,7 @@ import { ExportPanel } from "./workbench/ExportPanel";
 import { EpisodeParams } from "./workbench/EpisodeParams";
 import { EpisodeTable } from "./workbench/EpisodeTable";
 import { EpisodeExportBar } from "./workbench/EpisodeExportBar";
+import { DebugPanel } from "./workbench/DebugPanel";
 import { TranscribeView } from "./TranscribeView";
 import { ExportView } from "./ExportView";
 import { ClipReviewModal } from "./ClipReviewModal";
@@ -523,6 +524,7 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
         </div>
 
         {transcript && tab !== "transcript" && session.workMode === "clip" && <Inspector transcript={transcript} onRedetect={() => void run()} onOpenReview={setReviewId} />}
+        <DebugPanel />
       </div>
 
       {transcript && session.workMode === "clip" && candidates && candidates.length > 0 && (
