@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseBreaks, smartSplit, fixedSplit, manualSplit, snapToSentenceBoundary, formatEpisodeNumber, applyTitleTemplate } from "../episode/split";
+import { parseBreaks, smartSplit, fixedSplit, manualSplit, snapToSentenceBoundary, formatEpisodeNumber, applyTitleTemplate, selectBreaksGlobal, enforceDuration, cleanReason, targetRange } from "../episode/split";
 import type { Transcript, EpisodeSplitConfig } from "../../shared/api-types";
 import { EPISODE_SPLIT_DEFAULTS } from "../../shared/api-types";
 
@@ -159,23 +159,128 @@ describe("fixedSplit", () => {
 });
 
 describe("smartSplit", () => {
-  it("uses LLM breaks when available", () => {
+  const RANGE: EpisodeSplitConfig = { ...EPISODE_SPLIT_DEFAULTS, targetMinSec: 600, targetMaxSec: 1200 };
+
+  it("uses LLM breaks that already satisfy the target range", () => {
     const t = makeLongTranscript(3600);
     const breaks = [
-      { segmentId: 10, timeSec: 600, reason: "话题A结束", chapterTitle: "第二章" },
-      { segmentId: 20, timeSec: 1200, reason: "话题B结束", chapterTitle: "第三章" },
+      { segmentId: 20, timeSec: 1200, reason: "话题A结束", chapterTitle: "第二章" },
+      { segmentId: 40, timeSec: 2400, reason: "话题B结束", chapterTitle: "第三章" },
     ];
-    const eps = smartSplit(t, breaks, EPISODE_SPLIT_DEFAULTS);
+    const eps = smartSplit(t, breaks, RANGE);
     expect(eps).toHaveLength(3);
-    expect(eps[0].endSec).toBe(600);
-    expect(eps[1].startSec).toBe(600);
+    expect(eps[0].endSec).toBe(1200);
+    expect(eps[1].startSec).toBe(1200);
     expect(eps[2].endSec).toBe(3600);
+  });
+
+  it("assigns chapterTitle to the episode that starts at the break, not the one before it", () => {
+    const t = makeLongTranscript(3600);
+    const breaks = [{ segmentId: 20, timeSec: 1200, reason: "转入实操", chapterTitle: "实操演示" }];
+    const eps = smartSplit(t, breaks, { ...RANGE, targetMaxSec: 2400 });
+    expect(eps[0].title).toBe("第 1 集");
+    expect(eps[1].title).toBe("实操演示");
+    expect(eps[1].reason).toBe("转入实操");
+  });
+
+  it("drops candidate breaks that would make an episode shorter than the minimum", () => {
+    const t = makeLongTranscript(3600);
+    // 每 2 分钟一个候选:照单全收会切出 29 集,每集只有 120 秒
+    const breaks = Array.from({ length: 29 }, (_, i) => ({
+      segmentId: (i + 1) * 2,
+      timeSec: (i + 1) * 120,
+      reason: "切换",
+      chapterTitle: `章 ${i + 1}`,
+    }));
+    const eps = smartSplit(t, breaks, RANGE);
+    expect(eps.length).toBeLessThanOrEqual(6);
+    for (const ep of eps) {
+      expect(ep.durationSec).toBeGreaterThanOrEqual(600);
+      expect(ep.durationSec).toBeLessThanOrEqual(1200);
+    }
+  });
+
+  it("force-cuts a stretch that has no candidate break inside it", () => {
+    const t = makeLongTranscript(3600);
+    // 只有一个候选,余下 2400 秒远超 targetMax
+    const breaks = [{ segmentId: 20, timeSec: 1200, reason: "唯一切换", chapterTitle: "第二章" }];
+    const eps = smartSplit(t, breaks, RANGE);
+    expect(eps.length).toBeGreaterThanOrEqual(3);
+    for (const ep of eps) {
+      expect(ep.durationSec).toBeLessThanOrEqual(1200);
+    }
+    expect(eps[eps.length - 1].endSec).toBe(3600);
+  });
+
+  it("keeps episode boundaries contiguous and ids sequential after post-processing", () => {
+    const t = makeLongTranscript(7200);
+    const breaks = [
+      { segmentId: 5, timeSec: 300, reason: "太早", chapterTitle: "A" },
+      { segmentId: 60, timeSec: 3600, reason: "中段", chapterTitle: "B" },
+    ];
+    const eps = smartSplit(t, breaks, RANGE);
+    expect(eps[0].startSec).toBe(0);
+    expect(eps[eps.length - 1].endSec).toBe(7200);
+    eps.forEach((ep, i) => {
+      expect(ep.id).toBe(i + 1);
+      if (i > 0) expect(ep.startSec).toBe(eps[i - 1].endSec);
+    });
   });
 
   it("falls back to fixedSplit when no breaks", () => {
     const t = makeLongTranscript(7200);
     const eps = smartSplit(t, [], EPISODE_SPLIT_DEFAULTS);
     expect(eps.length).toBeGreaterThan(1);
+  });
+});
+
+describe("selectBreaksGlobal", () => {
+  it("prefers the candidate nearest the ideal length when several are available", () => {
+    const range = targetRange({ ...EPISODE_SPLIT_DEFAULTS, targetMinSec: 600, targetMaxSec: 1200 });
+    const candidates = [700, 900, 1100, 1800, 2000, 2700].map((timeSec) => ({
+      segmentId: 0, timeSec, reason: "", chapterTitle: "",
+    }));
+    const picked = selectBreaksGlobal(candidates, 3600, range);
+    expect(picked.map((p) => p.timeSec)).toContain(900);
+    expect(picked.map((p) => p.timeSec)).not.toContain(700);
+  });
+
+  it("returns nothing when there are no candidates", () => {
+    const range = targetRange(EPISODE_SPLIT_DEFAULTS);
+    expect(selectBreaksGlobal([], 3600, range)).toEqual([]);
+  });
+});
+
+describe("cleanReason", () => {
+  it("drops clauses that carry the model's deliberation", () => {
+    expect(cleanReason("从概念转入实操。建议在此断开,若时长不足可合并")).toBe("从概念转入实操");
+  });
+
+  it("returns empty when every clause is deliberation", () => {
+    expect(cleanReason("建议切在这里。符合目标时长范围")).toBe("");
+  });
+
+  it("truncates to 40 characters", () => {
+    expect(cleanReason("话题切换".repeat(20)).length).toBe(40);
+  });
+});
+
+describe("enforceDuration", () => {
+  const range = targetRange({ ...EPISODE_SPLIT_DEFAULTS, targetMinSec: 600, targetMaxSec: 1200 });
+
+  it("merges a too-short episode into the shorter neighbour", () => {
+    const t = makeLongTranscript(3600);
+    const eps = [
+      { id: 1, title: "A", startSec: 0, endSec: 1100, durationSec: 1100, reason: "" },
+      { id: 2, title: "B", startSec: 1100, endSec: 1200, durationSec: 100, reason: "" },
+      { id: 3, title: "C", startSec: 1200, endSec: 3600, durationSec: 2400, reason: "" },
+    ];
+    const out = enforceDuration(eps, t, [], range);
+    for (const ep of out) {
+      expect(ep.durationSec).toBeGreaterThanOrEqual(600);
+      expect(ep.durationSec).toBeLessThanOrEqual(1200);
+    }
+    expect(out[out.length - 1].endSec).toBe(3600);
   });
 });
 

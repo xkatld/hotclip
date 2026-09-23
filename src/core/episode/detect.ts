@@ -1,10 +1,17 @@
 import type { Transcript, LlmConfig, EpisodeCandidate, EpisodeSplitConfig } from "../../shared/api-types";
 import { episodeSystemPrompt, buildWindowPrompt, isChineseTranscript } from "./prompt";
 import { parseBreaks, smartSplit, fixedSplit, resolveTargetInterval, type RawBreak } from "./split";
-import { chatCompleteJson } from "../llm-transport";
+import { chatCompleteJson, LlmReasoningOnlyError } from "../llm-transport";
 
-const WINDOW_SEC = 30 * 60;
-const OVERLAP_SEC = 2 * 60;
+/**
+ * 窗口只是为了不把两小时逐句稿一次性塞进上下文,不是分集单位。
+ * 加大到 45 分钟让模型在更长的语境里判断话题走向;5 分钟重叠保证
+ * 骑在窗口边界上的切换点至少被一侧完整看到。
+ */
+const WINDOW_SEC = 45 * 60;
+const OVERLAP_SEC = 5 * 60;
+/** 窗口之间并行;上限只是防跑飞,常见素材(6 小时 = 8 窗口)等同于全并行。 */
+const WINDOW_CONCURRENCY = 16;
 
 interface WindowSegment {
   id: number;
@@ -54,28 +61,50 @@ async function detectWindow(
   windowStart: number,
   windowEnd: number,
   totalDurationSec: number,
-  targetMinSec: number,
-  targetMaxSec: number,
   zh: boolean,
   signal?: AbortSignal
 ): Promise<RawBreak[]> {
-  const userPrompt = buildWindowPrompt(
-    segments,
-    windowStart,
-    windowEnd,
-    totalDurationSec,
-    targetMinSec,
-    targetMaxSec,
-    zh
-  );
-  return chatCompleteJson(llm, systemPrompt, userPrompt, parseBreaks, signal, { temperature: 0.2 });
+  const userPrompt = buildWindowPrompt(segments, windowStart, windowEnd, totalDurationSec, zh);
+  return chatCompleteJson(llm, systemPrompt, userPrompt, parseBreaks, signal, {
+    temperature: 0.2,
+    rejectReasoningFallback: true,
+  });
 }
+
+/** 有上限的并发执行,结果按输入顺序返回,单个失败不拖垮其他窗口。 */
+async function runWithLimit<T, R>(
+  items: T[],
+  limit: number,
+  task: (item: T, index: number) => Promise<R>
+): Promise<PromiseSettledResult<R>[]> {
+  const results = new Array<PromiseSettledResult<R>>(items.length);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      try {
+        results[index] = { status: "fulfilled", value: await task(items[index], index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/**
+ * 只去掉重叠区里同一个切换点被两侧窗口各报一次的重复,不做密度筛选。
+ * 全局选点要的是尽量全的候选池,这里删掉的每个点 DP 都再也看不到。
+ */
+const DUPLICATE_GAP_SEC = 20;
 
 function mergeBreaks(allBreaks: RawBreak[]): RawBreak[] {
   const sorted = [...allBreaks].sort((a, b) => a.timeSec - b.timeSec);
   const merged: RawBreak[] = [];
   for (const b of sorted) {
-    if (merged.length === 0 || b.timeSec - merged[merged.length - 1].timeSec >= 60) {
+    if (merged.length === 0 || b.timeSec - merged[merged.length - 1].timeSec >= DUPLICATE_GAP_SEC) {
       merged.push(b);
     }
   }
@@ -116,28 +145,21 @@ export async function detectEpisodes(
   const allBreaks: RawBreak[] = [];
   const errors: string[] = [];
 
-  for (let i = 0; i < windows.length; i++) {
-    signal?.throwIfAborted();
-    const w = windows[i];
-    try {
-      const breaks = await detectWindow(
-        llm,
-        systemPrompt,
-        w.segments,
-        w.startSec,
-        w.endSec,
-        transcript.durationSec,
-        config.targetMinSec,
-        config.targetMaxSec,
-        zh,
-        signal
-      );
-      allBreaks.push(...breaks);
-    } catch (err) {
-      if (signal?.aborted) throw err;
-      const at = `${Math.round(w.startSec / 60)}-${Math.round(w.endSec / 60)} 分`;
-      errors.push(`第 ${i + 1} 段 ${at}: ${err instanceof Error ? err.message : String(err)}`);
+  const settled = await runWithLimit(windows, WINDOW_CONCURRENCY, (w) =>
+    detectWindow(llm, systemPrompt, w.segments, w.startSec, w.endSec, transcript.durationSec, zh, signal));
+
+  for (let i = 0; i < settled.length; i++) {
+    const outcome = settled[i];
+    if (outcome.status === "fulfilled") {
+      allBreaks.push(...outcome.value);
+      continue;
     }
+    signal?.throwIfAborted();
+    // 思考型模型换一个窗口也还是只吐思考,继续跑只是浪费额度,直接让用户换模型。
+    if (outcome.reason instanceof LlmReasoningOnlyError) throw outcome.reason;
+    const w = windows[i];
+    const at = `${Math.round(w.startSec / 60)}-${Math.round(w.endSec / 60)} 分`;
+    errors.push(`第 ${i + 1} 段 ${at}: ${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`);
   }
 
   if (errors.length === windows.length) {

@@ -23,11 +23,19 @@ function cleanTitle(text: string): string {
     .trim();
 }
 
-function usableTitles(values: unknown[]): string[] {
-  return values.map((value) => (typeof value === "string" ? cleanTitle(value) : ""));
+/** 一条标题:id 缺失时按出现顺序配集号。 */
+export interface TitleRow {
+  id: number | null;
+  title: string;
 }
 
-function titlesFromJson(content: string): string[] | null {
+function toId(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return null;
+}
+
+function rowsFromJson(content: string): TitleRow[] | null {
   let parsed: { titles?: unknown };
   try {
     parsed = JSON.parse(extractJson(content)) as { titles?: unknown };
@@ -35,12 +43,23 @@ function titlesFromJson(content: string): string[] | null {
     return null;
   }
   if (!Array.isArray(parsed.titles)) return null;
-  return usableTitles(parsed.titles);
+  return parsed.titles.map((value) => {
+    if (typeof value === "string") return { id: null, title: cleanTitle(value) };
+    if (typeof value === "object" && value !== null) {
+      const row = value as Record<string, unknown>;
+      return {
+        id: toId(row.id),
+        title: typeof row.title === "string" ? cleanTitle(row.title) : "",
+      };
+    }
+    return { id: null, title: "" };
+  });
 }
 
-function titlesFromTable(content: string): string[] {
-  const out: string[] = [];
+function rowsFromTable(content: string): TitleRow[] {
+  const out: TitleRow[] = [];
   let titleCol = -1;
+  let idCol = -1;
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed.includes("|")) continue;
@@ -50,6 +69,7 @@ function titlesFromTable(content: string): string[] {
       const found = cells.findIndex((cell) => /标题|章节|title|chapter/i.test(cell));
       if (found >= 0) {
         titleCol = found;
+        idCol = cells.findIndex((cell) => /^(?:集|序号|id|no\.?|#)$/i.test(cell));
         continue;
       }
       const widest = cells.reduce((best, cell, i) => (cell.length > cells[best].length ? i : best), 0);
@@ -60,28 +80,29 @@ function titlesFromTable(content: string): string[] {
       continue;
     }
     const value = cleanTitle(cells[titleCol]);
-    if (value) out.push(value);
+    if (value) out.push({ id: idCol >= 0 ? toId(cells[idCol]) : null, title: value });
   }
   return out;
 }
 
-function titlesFromList(content: string): string[] {
-  const out: string[] = [];
+function rowsFromList(content: string): TitleRow[] {
+  const out: TitleRow[] = [];
   for (const line of content.split("\n")) {
     const match = line.trim().match(/^(?:\d+\s*[.、)]|[-*])\s*(.+)$/) ?? line.trim().match(/^第\s*\d+\s*集\s*[:：]?\s*(.+)$/);
     if (!match) continue;
     const value = cleanTitle(match[1]);
-    if (value && value.length <= 40) out.push(value);
+    if (value && value.length <= 40) out.push({ id: null, title: value });
   }
   return out;
 }
 
-export function parseTitles(content: string): string[] {
-  const fromJson = titlesFromJson(content);
+/** 三级容错读标题:id 键控 JSON → Markdown 表格 → 编号列表。 */
+export function parseTitleRows(content: string): TitleRow[] {
+  const fromJson = rowsFromJson(content);
   if (fromJson) return fromJson;
-  const fromTable = titlesFromTable(content);
+  const fromTable = rowsFromTable(content);
   if (fromTable.length > 0) return fromTable;
-  const fromList = titlesFromList(content);
+  const fromList = rowsFromList(content);
   if (fromList.length > 0) return fromList;
   throw new Error(`模型未返回可识别的标题列表 / unreadable titles: ${content.slice(0, 200)}`);
 }
@@ -120,7 +141,8 @@ const TITLE_SYSTEM_ZH = `你是短视频系列的分集编辑。给你每一集�
 标题: 三种免费图床横评:速度和稳定性实测
 
 【输出】只输出 JSON 本体,第一个字符是 {,最后一个字符是 },不要 Markdown 表格、不要代码块、不要任何解释
-{"titles":["标题1","标题2"]}`;
+每个对象的 id 必须原样抄用输入里那一集的 id,顺序不限,一集一条不要多给
+{"titles":[{"id":1,"title":"标题1"},{"id":2,"title":"标题2"}]}`;
 
 const TITLE_SYSTEM_EN = `You are a video series editor. Given the transcript excerpt of each episode, write a title that could be published as-is.
 
@@ -141,22 +163,54 @@ Excerpt: I tried three free image hosts and compared their speed and stability
 Title: Three Free Image Hosts Compared: Speed and Stability
 
 【Output】Raw JSON only, first character {, last character }, no Markdown table, no code fence, no prose
-{"titles":["Title 1","Title 2"]}`;
+Copy each episode's id verbatim from the input; any order, exactly one entry per episode
+{"titles":[{"id":1,"title":"Title 1"},{"id":2,"title":"Title 2"}]}`;
 
 async function generateTitlesViaLlm(
   transcript: Transcript,
   episodes: EpisodeCandidate[],
   llm: LlmConfig,
   signal?: AbortSignal
-): Promise<string[]> {
+): Promise<TitleRow[]> {
   const zh = isChineseTranscript(transcript);
   const blocks = episodes.map((ep) => {
     const minutes = Math.max(1, Math.round(ep.durationSec / 60));
-    const head = `[集 ${ep.id}] 时长约 ${minutes} 分钟`;
+    const head = `[集 id=${ep.id}] 时长约 ${minutes} 分钟`;
     const reason = ep.reason ? `\n断点理由: ${ep.reason}` : "";
     return `${head}${reason}\n台词摘录: ${episodeSample(transcript.segments, ep)}`;
   });
-  return chatCompleteJson(llm, zh ? TITLE_SYSTEM_ZH : TITLE_SYSTEM_EN, blocks.join("\n\n"), parseTitles, signal, { temperature: 0.3 });
+  return chatCompleteJson(llm, zh ? TITLE_SYSTEM_ZH : TITLE_SYSTEM_EN, blocks.join("\n\n"), parseTitleRows, signal, {
+    temperature: 0.3,
+    rejectReasoningFallback: true,
+  });
+}
+
+/**
+ * 不合格标题的形状:成对引号是模型在转述台词,冒号后跟"应是/应统一/大概率"
+ * 是把推理结论当标题写,超长则是整句照搬。这三种一律丢掉走 chapterTitle。
+ */
+const TITLE_QUOTED = /[“”"].+[“”"]|「.+」|《.+》/;
+const TITLE_DELIBERATION = /[:：]\s*(?:应是|应统一|大概率)/;
+const TITLE_MAX_CHARS = 30;
+
+export function isBadTitle(title: string): boolean {
+  if (!title) return true;
+  if (title.length > TITLE_MAX_CHARS) return true;
+  return TITLE_QUOTED.test(title) || TITLE_DELIBERATION.test(title);
+}
+
+/** 标题行 → 集 id;模型没给 id 时按出现顺序补,条数超标视为污染整批丢弃。 */
+function mapTitlesById(rows: TitleRow[], episodes: EpisodeCandidate[]): Map<number, string> {
+  const map = new Map<number, string>();
+  if (rows.length > episodes.length) return map;
+  const validIds = new Set(episodes.map((ep) => ep.id));
+  rows.forEach((row, i) => {
+    const id = row.id !== null && validIds.has(row.id) ? row.id : episodes[i]?.id;
+    if (id === undefined || map.has(id)) return;
+    if (isBadTitle(row.title)) return;
+    map.set(id, row.title);
+  });
+  return map;
 }
 
 function fallbackTitle(transcript: Transcript, ep: EpisodeCandidate): string {
@@ -178,19 +232,24 @@ export async function enrichEpisodeTitles(
   llm?: LlmConfig,
   signal?: AbortSignal
 ): Promise<EpisodeTitleResult> {
-  let aiTitles: string[] = [];
+  let rows: TitleRow[] = [];
   let titleWarning: string | undefined;
   if (llm) {
     try {
-      aiTitles = await generateTitlesViaLlm(transcript, episodes, llm, signal);
+      rows = await generateTitlesViaLlm(transcript, episodes, llm, signal);
     } catch (e) {
       if (signal?.aborted) throw e;
       titleWarning = e instanceof Error ? e.message : String(e);
     }
   }
 
-  const titled = episodes.map((ep, i) => {
-    const rawTitle = aiTitles[i]?.trim() || fallbackTitle(transcript, ep);
+  const byId = mapTitlesById(rows, episodes);
+  if (rows.length > episodes.length) {
+    titleWarning = `模型返回了 ${rows.length} 条标题但只有 ${episodes.length} 集,已全部改用章节名。`;
+  }
+
+  const titled = episodes.map((ep) => {
+    const rawTitle = byId.get(ep.id) ?? fallbackTitle(transcript, ep);
     const num = formatEpisodeNumber(ep.id, config.numberFormat, episodes.length);
     const fullTitle = config.titlePrefix
       ? applyTitleTemplate(config.titleTemplate, config.titlePrefix, num, rawTitle)

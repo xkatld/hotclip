@@ -49,11 +49,37 @@ describe("detectEpisodes 智能分集走模型正文", () => {
     )));
     const result = await detectEpisodes(makeTranscript(), LLM, CONFIG);
     expect(result.fallbackReason).toBeUndefined();
-    expect(result.episodes).toHaveLength(2);
-    expect(result.episodes[0].title).toBe("实操演示");
-    expect(result.episodes[0].reason).toBe("从概念转入实操");
     expect(result.episodes[0].endSec).toBe(300);
-    expect(result.episodes[1].endSec).toBe(720);
+    // chapterTitle 描述的是断点之后那一段,归属从断点开始的那一集
+    expect(result.episodes[1].title).toBe("实操演示");
+    expect(result.episodes[1].reason).toBe("从概念转入实操");
+    expect(result.episodes[result.episodes.length - 1].endSec).toBe(720);
+  });
+
+  it("时长硬约束生效:超过 targetMax 的尾段被补切,每集都落在目标范围内", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => envelope(
+      '{"breaks":[{"segmentId":5,"timeSec":300,"reason":"从概念转入实操","chapterTitle":"实操演示"}]}'
+    )));
+    const result = await detectEpisodes(makeTranscript(), LLM, CONFIG);
+    for (const ep of result.episodes) {
+      expect(ep.durationSec).toBeGreaterThanOrEqual(CONFIG.targetMinSec);
+      expect(ep.durationSec).toBeLessThanOrEqual(CONFIG.targetMaxSec);
+    }
+  });
+
+  it("reason 里的权衡过程被剔除,只留事实描述", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => envelope(
+      '{"breaks":[{"segmentId":5,"timeSec":300,"reason":"从概念转入实操。建议在此断开,符合目标时长","chapterTitle":"实操演示"}]}'
+    )));
+    const result = await detectEpisodes(makeTranscript(), LLM, CONFIG);
+    expect(result.episodes[1].reason).toBe("从概念转入实操");
+  });
+
+  it("模型只吐思考不给正文时,直接报错让用户换模型,不静默回退等时", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "", reasoning_content: "让我先通读一遍逐句稿" } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    await expect(detectEpisodes(makeTranscript(), LLM, CONFIG)).rejects.toThrow("只返回了思考过程");
   });
 
   it("模型明确说没有断点时,回退原因说明是内容连贯,不是解析失败", async () => {
@@ -76,5 +102,13 @@ describe("detectEpisodes 智能分集走模型正文", () => {
     )));
     const result = await detectEpisodes(makeTranscript(), LLM, CONFIG);
     expect(result.episodes[0].endSec).toBe(300);
+  });
+
+  it("长视频按 45 分钟窗口并行调用,窗口数与调用次数一致", async () => {
+    const fetchMock = vi.fn(async () => envelope('{"breaks":[]}'));
+    vi.stubGlobal("fetch", fetchMock);
+    // 2 小时 → 45/45/30 三个窗口
+    await detectEpisodes(makeTranscript(7200), LLM, CONFIG);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

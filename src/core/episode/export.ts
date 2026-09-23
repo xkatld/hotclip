@@ -10,7 +10,6 @@ import { cutClip } from "../cut";
 import { sanitizeFilename } from "../export";
 import { buildSrt, srtLinesFromWords } from "../srt";
 import { sliceWords } from "../subtitle";
-import { formatEpisodeNumber } from "./split";
 
 /** 分集导出进度回调。 */
 export interface EpisodeExportProgress {
@@ -54,8 +53,8 @@ export async function exportEpisodes(
     options?.signal?.throwIfAborted();
     options?.onProgress?.({ current: i + 1, total: episodes.length, episode: ep });
 
-    const num = formatEpisodeNumber(ep.id, config.numberFormat, episodes.length);
-    const safeName = sanitizeFilename(`${num} ${ep.title}`, `episode-${ep.id}`);
+    // ep.title 由 enrichEpisodeTitles 组装,集号已经在里面,这里再拼一次会出现 "01 01 标题"
+    const safeName = sanitizeFilename(ep.title, `episode-${ep.id}`);
     const outputPath = join(outDir, `${safeName}.mp4`);
 
     // 分集是完整内容,不做跳剪/不裁画幅/不加字幕烧录——原样切出

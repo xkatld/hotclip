@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { LuFolderOpen, LuScissors } from "react-icons/lu";
 import { useT } from "../../i18n/store";
 import { useSession } from "../../stores/session-store";
+import { useRenderPrefs } from "../../stores/render-prefs-store";
 import { getApi } from "../../api/provider";
 import { debugLog, debugError, debugSuccess } from "../../stores/debug-store";
 
@@ -23,6 +24,7 @@ export function EpisodeExportBar(): React.JSX.Element {
     episodeConfig,
     setEpisodeExporting,
   } = useSession();
+  const preferredOutDir = useRenderPrefs((s) => s.prefs.outDir);
 
   const all = episodes ?? [];
   const picked = all.filter((e) => episodeSelected.has(e.id));
@@ -52,21 +54,18 @@ export function EpisodeExportBar(): React.JSX.Element {
     debugLog(`[导出] 配置: prefix="${episodeConfig.titlePrefix}" fmt=${episodeConfig.numberFormat} srt=${episodeConfig.srtFile}`);
     const t0 = Date.now();
     try {
-      const outDir = await getApi().defaultOutDir();
-      const episodeOutDir = `${outDir}/episodes`;
-      debugLog(`[导出] 输出目录: ${episodeOutDir}`);
-      const results = await getApi().episodeExport({
+      debugLog(`[导出] 输出根目录: ${preferredOutDir || "系统默认"}`);
+      const outcome = await getApi().episodeExport({
         inputPath: file.path,
         episodes: picked,
         transcript,
-        outDir: episodeOutDir,
+        outDir: preferredOutDir || undefined,
         config: episodeConfig,
       });
       debugSuccess(`[导出] 完成, ${picked.length} 集, 耗时 ${Date.now() - t0}ms`);
-      if (Array.isArray(results)) {
-        results.forEach((r: any) => debugLog(`  -> ${r.outputPath ?? r.title}`));
-      }
-      setExportDone({ count: picked.length, outDir: episodeOutDir });
+      debugLog(`[导出] 实际目录: ${outcome.outDir}`);
+      outcome.results.forEach((r) => debugLog(`  -> ${r.outputPath}`));
+      setExportDone({ count: picked.length, outDir: outcome.outDir });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("Episode export failed:", msg);

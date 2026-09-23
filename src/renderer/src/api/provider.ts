@@ -798,7 +798,7 @@ const browserMock: HotClipApi = {
   },
   async episodeExport() {
     await sleep(1000);
-    return [];
+    return { outDir: "/mock/HotClip/demo/episodes", results: [] };
   },
   onEpisodeExportProgress() {
     return () => {};

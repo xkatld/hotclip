@@ -12,6 +12,17 @@ export function llmRequestBudget(timeoutMs: number, retries = 0): LlmRequestBudg
   return { deadline: Date.now() + timeoutMs, retriesRemaining: retries };
 }
 
+/** 只返回思考过程、正文为空的模型：结构化输出（分集/标题）不能拿思考当答案。 */
+export class LlmReasoningOnlyError extends Error {
+  constructor() {
+    super(
+      "当前模型只返回了思考过程,没有返回正文。分集与标题需要结构化输出,请在模型列表换成非思考版本(通常带 instruct/chat 字样),或换常规对话模型。" +
+        " / This model returned only its reasoning with no content. Episode splitting needs structured output — switch to a non-thinking variant (usually named instruct/chat) or a regular chat model."
+    );
+    this.name = "LlmReasoningOnlyError";
+  }
+}
+
 export class LlmTransportError extends Error {
   constructor(readonly kind: "timeout" | "response-too-large") {
     super(kind === "timeout"
@@ -185,6 +196,8 @@ export function unwrapLlmBody(text: string): string {
 
 export interface ChatRequestOptions {
   temperature?: number;
+  /** 结构化输出专用：正文为空时不拿 reasoning 顶替，直接抛 LlmReasoningOnlyError。 */
+  rejectReasoningFallback?: boolean;
 }
 
 export const DEFAULT_CHAT_TEMPERATURE = 0.6;
@@ -259,6 +272,8 @@ export async function chatComplete(llm: LlmConfig, system: string, user: string,
     first = await chatAttempt(llm, system, user, signal, MAX_TOKENS, budget, false, temperature);
   }
   if (first.content) return first.content;
+  // 思考型模型的 reasoning 不是答案：结构化输出宁可报错换模型，也不要拿思考过程去解析。
+  if (options.rejectReasoningFallback && first.reasoning) throw new LlmReasoningOnlyError();
   if (first.reasoning && first.finishReason !== "length") return first.reasoning;
   let retry: ChatAttempt | null = null;
   try {
@@ -268,6 +283,7 @@ export async function chatComplete(llm: LlmConfig, system: string, user: string,
     if (e instanceof LlmTransportError) throw e;
   }
   if (retry?.content) return retry.content;
+  if (options.rejectReasoningFallback && retry?.reasoning) throw new LlmReasoningOnlyError();
   if (retry?.reasoning && retry.finishReason !== "length") return retry.reasoning;
   const filtered = first.finishReason === "content_filter" || retry?.finishReason === "content_filter";
   const thinking =

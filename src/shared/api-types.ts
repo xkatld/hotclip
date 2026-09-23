@@ -933,7 +933,7 @@ export interface HotClipApi {
   episodeTitles: (args: { transcript: Transcript; episodes: EpisodeCandidate[]; config: EpisodeSplitConfig; llm?: LlmConfig }) => Promise<EpisodeTitleResult>;
   episodeSplitFixed: (args: { transcript: Transcript; config: EpisodeSplitConfig }) => Promise<EpisodeCandidate[]>;
   episodeSplitManual: (args: { transcript: Transcript; breakpoints: number[] }) => Promise<EpisodeCandidate[]>;
-  episodeExport: (args: { inputPath: string; episodes: EpisodeCandidate[]; transcript: Transcript; outDir: string; config: EpisodeSplitConfig }) => Promise<EpisodeExportResult[]>;
+  episodeExport: (args: { inputPath: string; episodes: EpisodeCandidate[]; transcript: Transcript; outDir?: string; config: EpisodeSplitConfig }) => Promise<EpisodeExportOutcome>;
   onEpisodeExportProgress: (cb: (p: unknown) => void) => () => void;
   onDiagnosticsProgress: (cb: (p: DiagnosticsProgressEvent) => void) => () => void;
   diagnosticsCancelRepair: () => void;
@@ -1065,6 +1065,11 @@ export interface EpisodeExportResult {
   startSec: number;
   endSec: number;
   durationSec: number;
+}
+
+export interface EpisodeExportOutcome {
+  outDir: string;
+  results: EpisodeExportResult[];
 }
 
 export const EPISODE_SPLIT_DEFAULTS: EpisodeSplitConfig = {

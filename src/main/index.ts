@@ -1542,12 +1542,15 @@ ipcMain.handle("hotclip:episode-export", async (event, args: {
   inputPath: string;
   episodes: import("../shared/api-types").EpisodeCandidate[];
   transcript: import("../shared/api-types").Transcript;
-  outDir: string;
+  outDir?: string;
   config: import("../shared/api-types").EpisodeSplitConfig;
-}) => {
-  return exportEpisodes(args.inputPath, args.episodes, args.transcript, args.outDir, args.config, {
+}): Promise<import("../shared/api-types").EpisodeExportOutcome> => {
+  const sourceName = sanitizeFilename(basename(args.inputPath, extname(args.inputPath)), "video");
+  const outDir = join(clipOutDir(args.outDir, app.getPath("videos"), sourceName), "episodes");
+  const results = await exportEpisodes(args.inputPath, args.episodes, args.transcript, outDir, args.config, {
     onProgress: (p: EpisodeExportProgress) => event.sender.send("hotclip:episode-export-progress", p),
   });
+  return { outDir, results };
 });
 
 // 外链只放行本项目 GitHub(防任意 URL 注入系统浏览器)
