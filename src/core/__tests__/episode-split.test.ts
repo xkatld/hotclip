@@ -59,6 +59,53 @@ describe("parseBreaks", () => {
     expect(parseBreaks('{"breaks":[]}')).toEqual([]);
   });
 
+  it("reads a Markdown table when the model ignores the strict-JSON instruction", () => {
+    const raw = [
+      "建议把这段 00:00～11:02 切成 **3 集**，采用以下两个断点：",
+      "",
+      "| 断点 | 位置 | 时间戳 | 说明 |",
+      "|---|---|---|---|",
+      '| 断点 1 | 第 34 句之前 | **03:13** | 从"第一种方式：绑定 KV 命名空间"转入"设置环境变量 / UUID / 登录访问" |',
+      '| 断点 2 | 第 62 句之前 | **06:31** | 从"第一种方式收尾"转入"清理与验证" |',
+    ].join("\n");
+    const breaks = parseBreaks(raw);
+    expect(breaks).toHaveLength(2);
+    expect(breaks[0].timeSec).toBe(193);
+    expect(breaks[0].segmentId).toBe(34);
+    expect(breaks[0].reason).toContain("KV 命名空间");
+    expect(breaks[0].chapterTitle).toBe("");
+    expect(breaks[1].timeSec).toBe(391);
+    expect(breaks[1].segmentId).toBe(62);
+  });
+
+  it("reads a table that carries the chapter title column", () => {
+    const raw = [
+      "| 时间 | 章节 | 理由 |",
+      "|---|---|---|",
+      "| 12:30 | 环境变量配置 | 从概念转入实操 |",
+    ].join("\n");
+    const breaks = parseBreaks(raw);
+    expect(breaks).toHaveLength(1);
+    expect(breaks[0].timeSec).toBe(750);
+    expect(breaks[0].chapterTitle).toBe("环境变量配置");
+    expect(breaks[0].reason).toBe("从概念转入实操");
+  });
+
+  it("reads a headerless table by picking the column that holds a timestamp", () => {
+    const raw = ["| 断点 1 | 第 8 句 | 01:05 |", "| 断点 2 | 第 20 句 | 02:40 |"].join("\n");
+    const breaks = parseBreaks(raw);
+    expect(breaks.map((b) => b.timeSec)).toEqual([65, 160]);
+    expect(breaks[0].segmentId).toBe(8);
+  });
+
+  it("falls back to loose timestamp lines when there is no table", () => {
+    const raw = ["这段可以切成两集：", "- 03:13 从 KV 绑定转入环境变量配置", "- 06:31 转入清理与验证"].join("\n");
+    const breaks = parseBreaks(raw);
+    expect(breaks).toHaveLength(2);
+    expect(breaks[0].timeSec).toBe(193);
+    expect(breaks[0].reason).toContain("KV 绑定");
+  });
+
   it("throws on unparseable output so the caller can retry instead of silently falling back", () => {
     expect(() => parseBreaks("not json at all")).toThrow();
     expect(() => parseBreaks("{}")).toThrow();

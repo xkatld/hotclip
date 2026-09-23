@@ -786,7 +786,7 @@ const browserMock: HotClipApi = {
   },
   async episodeTitles(_args: any) {
     await sleep(400);
-    return _args.episodes;
+    return { episodes: _args.episodes };
   },
   async episodeSplitFixed(_args: any) {
     await sleep(200);

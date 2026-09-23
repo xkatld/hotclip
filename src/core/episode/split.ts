@@ -24,23 +24,43 @@ function toFiniteNumber(value: unknown): number | null {
   return null;
 }
 
-/**
- * 从模型正文里提取断点列表。先剥掉 OpenAI 响应信封再取 breaks:
- * 直接把 HTTP 响应体当正文解析,贪心正则会把整个信封吃掉,顶层永远没有
- * breaks 字段,断点恒为空——分集一直回退等时就是这一步。
- * 解析不出结构一律抛错,交给 chatCompleteJson 重发一次,不静默返回空。
- */
-export function parseBreaks(raw: string): RawBreak[] {
-  const body = unwrapLlmBody(raw);
+function cleanCell(text: string): string {
+  return text.replace(/[*_`#>]/g, "").replace(/\s+/g, " ").trim();
+}
+
+/** 单元格里读时间:MM:SS / HH:MM:SS / 纯秒数,允许加粗与「秒」后缀。 */
+export function parseClock(text: string): number | null {
+  const clean = cleanCell(text);
+  const clock = clean.match(/(\d{1,3}):(\d{1,2})(?::(\d{1,2}))?/);
+  if (clock) {
+    const first = Number(clock[1]);
+    const second = Number(clock[2]);
+    const third = clock[3] === undefined ? null : Number(clock[3]);
+    return third === null ? first * 60 + second : first * 3600 + second * 60 + third;
+  }
+  const plain = clean.match(/^(\d+(?:\.\d+)?)\s*(?:s|秒)?$/i);
+  return plain ? Number(plain[1]) : null;
+}
+
+function parseSegmentId(text: string): number {
+  const match = text.match(/第\s*(\d+)\s*句/);
+  return match ? Number(match[1]) : 0;
+}
+
+function sortBreaks(rows: RawBreak[]): RawBreak[] {
+  return rows.sort((a, b) => a.timeSec - b.timeSec);
+}
+
+function breaksFromJson(body: string): RawBreak[] | null {
   const match = body.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error(`模型未返回 JSON 断点列表 / no JSON in response: ${body.slice(0, 200)}`);
+  if (!match) return null;
   let parsed: { breaks?: unknown };
   try {
     parsed = JSON.parse(match[0]) as { breaks?: unknown };
   } catch {
-    throw new Error(`模型返回的断点列表不是合法 JSON / invalid JSON: ${match[0].slice(0, 200)}`);
+    return null;
   }
-  if (!Array.isArray(parsed.breaks)) throw new Error("模型输出缺少 breaks 数组 / missing breaks array");
+  if (!Array.isArray(parsed.breaks)) return null;
   const out: RawBreak[] = [];
   for (const item of parsed.breaks) {
     if (typeof item !== "object" || item === null) continue;
@@ -50,11 +70,89 @@ export function parseBreaks(raw: string): RawBreak[] {
     out.push({
       segmentId: toFiniteNumber(row.segmentId) ?? 0,
       timeSec,
-      reason: typeof row.reason === "string" ? row.reason : "",
-      chapterTitle: typeof row.chapterTitle === "string" ? row.chapterTitle : "",
+      reason: typeof row.reason === "string" ? cleanCell(row.reason) : "",
+      chapterTitle: typeof row.chapterTitle === "string" ? cleanCell(row.chapterTitle) : "",
     });
   }
-  return out.sort((a, b) => a.timeSec - b.timeSec);
+  return sortBreaks(out);
+}
+
+function splitTableRow(line: string): string[] {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return [];
+  return trimmed.replace(/^\|/, "").replace(/\|$/, "").split("|").map(cleanCell);
+}
+
+function isSeparatorRow(cells: string[]): boolean {
+  return cells.length > 0 && cells.every((cell) => cell === "" || /^:?-{2,}:?$/.test(cell.replace(/\s/g, "")));
+}
+
+const TIME_HEADER = /时间|time|timestamp/i;
+const REASON_HEADER = /说明|理由|依据|reason|why|note/i;
+const TITLE_HEADER = /标题|章节|chapter|title/i;
+const ID_HEADER = /位置|句号|句|segment|sentence/i;
+
+/** 模型爱用 Markdown 表格回答,按表头定位列把行读成断点。 */
+export function breaksFromTable(body: string): RawBreak[] {
+  const out: RawBreak[] = [];
+  let timeCol = -1;
+  let reasonCol = -1;
+  let titleCol = -1;
+  let idCol = -1;
+  for (const line of body.split("\n")) {
+    const cells = splitTableRow(line);
+    if (cells.length < 2 || isSeparatorRow(cells)) continue;
+    if (timeCol < 0 && cells.some((cell) => TIME_HEADER.test(cell)) && cells.some((cell) => REASON_HEADER.test(cell) || TITLE_HEADER.test(cell) || ID_HEADER.test(cell))) {
+      timeCol = cells.findIndex((cell) => TIME_HEADER.test(cell));
+      reasonCol = cells.findIndex((cell) => REASON_HEADER.test(cell));
+      titleCol = cells.findIndex((cell) => TITLE_HEADER.test(cell));
+      idCol = cells.findIndex((cell) => ID_HEADER.test(cell));
+      continue;
+    }
+    const at = timeCol >= 0 ? timeCol : cells.findIndex((cell) => parseClock(cell) !== null);
+    const timeSec = at >= 0 ? parseClock(cells[at]) : null;
+    if (timeSec === null) continue;
+    const idCell = idCol >= 0 ? cells[idCol] : cells.find((cell) => /第\s*\d+\s*句/.test(cell)) ?? "";
+    out.push({
+      segmentId: parseSegmentId(idCell),
+      timeSec,
+      reason: reasonCol >= 0 ? cells[reasonCol] : "",
+      chapterTitle: titleCol >= 0 ? cells[titleCol] : "",
+    });
+  }
+  return sortBreaks(out);
+}
+
+function breaksFromLooseText(body: string): RawBreak[] {
+  const out: RawBreak[] = [];
+  for (const line of body.split("\n")) {
+    if (splitTableRow(line).length >= 2) continue;
+    const timeSec = parseClock(line);
+    if (timeSec === null) continue;
+    const reason = cleanCell(line)
+      .replace(/\d{1,3}:\d{1,2}(?::\d{1,2})?/, "")
+      .replace(/第\s*\d+\s*句[^\s,，。]*/g, "")
+      .replace(/[\\/·—～~-]{1,}/g, " ")
+      .trim();
+    out.push({ segmentId: parseSegmentId(line), timeSec, reason: reason.slice(0, 60), chapterTitle: "" });
+  }
+  return sortBreaks(out);
+}
+
+/**
+ * 从模型正文里提取断点列表,三级容错:JSON → Markdown 表格 → 松散时间戳行。
+ * 模型经常无视「严格 JSON」改吐表格,而表格里的断点位置、句号、理由一样不少,
+ * 只认 JSON 等于把正确答案扔掉。三级都读不出才抛错,交给 chatCompleteJson 重发。
+ */
+export function parseBreaks(raw: string): RawBreak[] {
+  const body = unwrapLlmBody(raw);
+  const fromJson = breaksFromJson(body);
+  if (fromJson) return fromJson;
+  const fromTable = breaksFromTable(body);
+  if (fromTable.length > 0) return fromTable;
+  const fromLoose = breaksFromLooseText(body);
+  if (fromLoose.length > 0) return fromLoose;
+  throw new Error(`模型未返回可识别的断点列表 / unreadable breaks: ${body.slice(0, 200)}`);
 }
 
 /**

@@ -68,7 +68,7 @@ async function detectWindow(
     targetMaxSec,
     zh
   );
-  return chatCompleteJson(llm, systemPrompt, userPrompt, parseBreaks, signal);
+  return chatCompleteJson(llm, systemPrompt, userPrompt, parseBreaks, signal, { temperature: 0.2 });
 }
 
 function mergeBreaks(allBreaks: RawBreak[]): RawBreak[] {

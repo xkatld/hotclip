@@ -31,6 +31,7 @@ import { TranscriptPickModal } from "./TranscriptPickModal";
 import { BrandStyleModal } from "./BrandStyleModal";
 import { WatchFolderModal } from "./WatchFolderModal";
 import { clipDurationSec } from "../../../shared/pieces";
+import { debugLog } from "../stores/debug-store";
 import { resolveWorkbenchShortcut } from "../keyboard-shortcuts";
 import type { ClipPiece, HighlightCandidate, ReviewedCandidate, SessionEditCommand } from "../../../shared/api-types";
 
@@ -330,11 +331,13 @@ export function Workbench({ onCloseProject }: { onCloseProject: () => void }): R
     void getApi()
       .recordReview(s.file?.path ?? "", summarize(picked), summarize((s.candidates ?? []).filter((c) => !s.selected.has(c.id))))
       .catch(() => {});
-    s.setExporting({
-      clips: picked,
-      options: buildRenderToggles({ prefs, config, brandState, diarize: s.diarize, transcript: s.transcript, atlasReady }),
-    });
-  }, [prefs, config, brandState, atlasReady]);
+    const options = buildRenderToggles({ prefs, config, brandState, diarize: s.diarize, transcript: s.transcript, atlasReady });
+    debugLog(`[切片] 开始导出 ${picked.length} 条,总时长 ${Math.round(picked.reduce((n, c) => n + clipDurationSec(c), 0))}s`);
+    debugLog(`[切片] 配置 画幅=${options.vertical ? "竖屏" : "原画幅"} 字幕=${options.captionStyle} 跳剪=${options.jumpCut ? "开" : "关"} 去口头禅=${options.cleanFillers ? "开" : "关"} 降噪=${options.denoise ? options.denoiseMode ?? "basic" : "关"} 响度=${options.normalizeLoudness ? "开" : "关"} 画质=${options.quality ?? "high"}`);
+    debugLog(`[切片] 输出目录: ${options.outDir ?? defaultOutDir ?? "系统默认"}`);
+    picked.forEach((c) => debugLog(`  ${c.id}: ${Math.round(clipDurationSec(c))}s ${c.title}`));
+    s.setExporting({ clips: picked, options });
+  }, [prefs, config, brandState, atlasReady, defaultOutDir]);
 
   if (!file) return <></>;
 

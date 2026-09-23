@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { LuScissors, LuCircleCheck, LuFolderOpen, LuArrowLeft, LuRotateCcw, LuFilm, LuCircleStop } from "react-icons/lu";
 import { useT } from "../i18n/store";
 import { getApi, isElectron } from "../api/provider";
+import { debugError, debugLog, debugSuccess, debugWarn } from "../stores/debug-store";
 import { exportProgressPercent } from "../../../shared/export-progress";
 import { exportNeedsTranscript } from "../../../shared/export-transcript";
 import type {
@@ -53,13 +54,21 @@ export function ExportView({
     if (running.current) return;
     running.current = true;
     const id = ++requestId.current;
+    const t0 = Date.now();
     setCancelling(false);
     setError(null);
     setResults(null);
     setProgress(null);
     const api = getApi();
+    debugLog(`[切片] 导出任务启动: ${clips.length} 条 字幕=${options.captionStyle} 画幅=${options.vertical ? "竖屏" : "原画幅"}`);
+    let lastStage = "";
     const unsubscribe = api.onExportProgress((value) => {
-      if (id === requestId.current) setProgress(value);
+      if (id !== requestId.current) return;
+      setProgress(value);
+      const key = `${value.stage}|${value.preparation ?? ""}|${value.clipId}`;
+      if (key === lastStage) return;
+      lastStage = key;
+      debugLog(`[切片] 阶段 ${value.stage}${value.preparation ? ` ${value.preparation}` : ""} ${value.current}/${value.total} ${exportProgressPercent(value)}%`);
     });
     unsubscribeProgress.current = unsubscribe;
     api
@@ -68,8 +77,19 @@ export function ExportView({
         ...options,
         transcript: exportNeedsTranscript(options) ? transcript : undefined,
       })
-      .then((value) => { if (id === requestId.current) setResults(value); })
-      .catch((e) => { if (id === requestId.current) setError(e instanceof Error ? e.message : String(e)); })
+      .then((value) => {
+        if (id !== requestId.current) return;
+        setResults(value);
+        debugSuccess(`[切片] 导出完成: ${value.length} 条 (${Date.now() - t0}ms)`);
+        value.forEach((clip) => debugLog(`  -> ${Math.round(clip.durationSec)}s ${formatSize(clip.sizeBytes)} ${clip.path}`));
+      })
+      .catch((e) => {
+        if (id !== requestId.current) return;
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(msg);
+        if (/cancel/i.test(msg)) debugWarn("[切片] 导出已取消");
+        else debugError(`[切片] 导出失败: ${msg}`);
+      })
       .finally(() => {
         unsubscribe();
         if (id === requestId.current) { running.current = false; setCancelling(false); }

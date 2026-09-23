@@ -183,6 +183,12 @@ export function unwrapLlmBody(text: string): string {
   return envelope && envelope.content ? envelope.content : text;
 }
 
+export interface ChatRequestOptions {
+  temperature?: number;
+}
+
+export const DEFAULT_CHAT_TEMPERATURE = 0.6;
+
 async function chatAttempt(
   llm: LlmConfig,
   system: string,
@@ -190,7 +196,8 @@ async function chatAttempt(
   signal: AbortSignal | undefined,
   maxTokens: number,
   budget: LlmRequestBudget,
-  includeThinkingParam = true
+  includeThinkingParam = true,
+  temperature = DEFAULT_CHAT_TEMPERATURE
 ): Promise<ChatAttempt> {
   const url = `${llm.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   let res: Awaited<ReturnType<typeof requestLlmText>>;
@@ -207,7 +214,7 @@ async function chatAttempt(
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        temperature: 0.6,
+        temperature,
         max_tokens: maxTokens,
         ...extraParams(llm.baseUrl),
         ...(includeThinkingParam ? thinkingParams(llm.model) : {}),
@@ -238,23 +245,24 @@ async function chatAttempt(
   return envelope;
 }
 
-export async function chatComplete(llm: LlmConfig, system: string, user: string, signal?: AbortSignal): Promise<string> {
+export async function chatComplete(llm: LlmConfig, system: string, user: string, signal?: AbortSignal, options: ChatRequestOptions = {}): Promise<string> {
+  const temperature = options.temperature ?? DEFAULT_CHAT_TEMPERATURE;
   const budget = llmRequestBudget(isLocalBaseUrl(llm.baseUrl) ? LLM_LOCAL_TIMEOUT_MS : LLM_REMOTE_TIMEOUT_MS, 1);
   let includeThinkingParam = Object.keys(thinkingParams(llm.model)).length > 0;
   let first: ChatAttempt;
   try {
-    first = await chatAttempt(llm, system, user, signal, MAX_TOKENS, budget, includeThinkingParam);
+    first = await chatAttempt(llm, system, user, signal, MAX_TOKENS, budget, includeThinkingParam, temperature);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (!includeThinkingParam || !/HTTP 400/i.test(message) || !/thinking|unknown parameter|unsupported/i.test(message)) throw e;
     includeThinkingParam = false;
-    first = await chatAttempt(llm, system, user, signal, MAX_TOKENS, budget, false);
+    first = await chatAttempt(llm, system, user, signal, MAX_TOKENS, budget, false, temperature);
   }
   if (first.content) return first.content;
   if (first.reasoning && first.finishReason !== "length") return first.reasoning;
   let retry: ChatAttempt | null = null;
   try {
-    retry = await chatAttempt(llm, system, user, signal, RETRY_MAX_TOKENS, budget, includeThinkingParam);
+    retry = await chatAttempt(llm, system, user, signal, RETRY_MAX_TOKENS, budget, includeThinkingParam, temperature);
   } catch (e) {
     if (signal?.aborted) throw e;
     if (e instanceof LlmTransportError) throw e;
@@ -279,11 +287,12 @@ export async function chatCompleteJson<T>(
   system: string,
   user: string,
   parse: (content: string) => T,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: ChatRequestOptions = {}
 ): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < JSON_ATTEMPTS; i++) {
-    const content = await chatComplete(llm, system, user, signal);
+    const content = await chatComplete(llm, system, user, signal, options);
     try {
       return parse(content);
     } catch (e) {

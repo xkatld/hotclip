@@ -930,7 +930,7 @@ export interface HotClipApi {
   diagnosticsPrepareModels: (llm: LlmConfig | null, locale?: "zh" | "en") => Promise<DiagnosticsReport>;
   // ── 长视频分集 ──
   episodeDetect: (args: { transcript: Transcript; llm: LlmConfig; config: EpisodeSplitConfig }) => Promise<{ episodes: EpisodeCandidate[]; fallbackReason?: string }>;
-  episodeTitles: (args: { transcript: Transcript; episodes: EpisodeCandidate[]; config: EpisodeSplitConfig; llm?: LlmConfig }) => Promise<EpisodeCandidate[]>;
+  episodeTitles: (args: { transcript: Transcript; episodes: EpisodeCandidate[]; config: EpisodeSplitConfig; llm?: LlmConfig }) => Promise<EpisodeTitleResult>;
   episodeSplitFixed: (args: { transcript: Transcript; config: EpisodeSplitConfig }) => Promise<EpisodeCandidate[]>;
   episodeSplitManual: (args: { transcript: Transcript; breakpoints: number[] }) => Promise<EpisodeCandidate[]>;
   episodeExport: (args: { inputPath: string; episodes: EpisodeCandidate[]; transcript: Transcript; outDir: string; config: EpisodeSplitConfig }) => Promise<EpisodeExportResult[]>;
@@ -1048,6 +1048,12 @@ export interface EpisodeCandidate {
   durationSec: number;
   /** 为什么在这里断(AI 给的理由,等时/手动模式为空)。 */
   reason: string;
+}
+
+/** 分集标题生成结果:标题失败不阻塞分集,失败原因回传给界面提示。 */
+export interface EpisodeTitleResult {
+  episodes: EpisodeCandidate[];
+  titleWarning?: string;
 }
 
 /** 分集导出结果(一集)。 */

@@ -74,8 +74,10 @@ export function EpisodeParams(): React.JSX.Element {
           debugLog("[分集] 调用 episodeTitles 生成标题...");
           const t1 = Date.now();
           try {
-            episodes = await getApi().episodeTitles({ transcript, episodes, config: cfg, llm: llmConfig });
+            const titled = await getApi().episodeTitles({ transcript, episodes, config: cfg, llm: llmConfig });
+            episodes = titled.episodes;
             debugSuccess(`[分集] 标题生成完成 (${Date.now() - t1}ms)`);
+            if (titled.titleWarning) debugWarn(`[分集] 标题回退到原文摘句: ${titled.titleWarning}`);
             episodes.forEach((ep) => debugLog(`  ${ep.id}: ${ep.title} [${formatClock(ep.startSec)} → ${formatClock(ep.endSec)}]${ep.reason ? ` ${ep.reason}` : ""}`));
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
