@@ -12,12 +12,12 @@ export function llmRequestBudget(timeoutMs: number, retries = 0): LlmRequestBudg
   return { deadline: Date.now() + timeoutMs, retriesRemaining: retries };
 }
 
-/** 只返回思考过程、正文为空的模型：结构化输出（分集/标题）不能拿思考当答案。 */
+/** 加大输出预算重发后仍然只有思考过程、正文为空：结构化输出（分集/标题）不能拿思考当答案。 */
 export class LlmReasoningOnlyError extends Error {
   constructor() {
     super(
-      "当前模型只返回了思考过程,没有返回正文。分集与标题需要结构化输出,请在模型列表换成非思考版本(通常带 instruct/chat 字样),或换常规对话模型。" +
-        " / This model returned only its reasoning with no content. Episode splitting needs structured output — switch to a non-thinking variant (usually named instruct/chat) or a regular chat model."
+      "当前模型只返回了思考过程,加大输出预算重试后正文仍然是空的。分集与标题需要结构化输出,请在模型列表换成非思考版本(通常带 instruct/chat 字样),或换常规对话模型。" +
+        " / This model returned only its reasoning, with an empty body even after retrying with a larger output budget. Episode splitting needs structured output — switch to a non-thinking variant (usually named instruct/chat) or a regular chat model."
     );
     this.name = "LlmReasoningOnlyError";
   }
@@ -130,9 +130,37 @@ export function modelErrorDetail(text: string, apiKey: string, maxLength = 300):
   return detail.replace(/Bearer\s+[^\s"'<>]+/gi, "Bearer [redacted]").slice(0, maxLength);
 }
 
-export const MAX_TOKENS = 4000;
-export const RETRY_MAX_TOKENS = 16000;
+/**
+ * 输出预算。思考型模型把 reasoning 也算进 max_tokens,4000 在长窗口下会被
+ * 思考烧光、正文一个字都吐不出来(实测 45 分钟窗口 mt=500 时 content 为空)。
+ * max_tokens 只是上限、按实际生成量计费,给大不花钱,给小直接丢答案。
+ * 16000 是各家普遍接受的上限;个别供应商会按自己的模型上限拒掉,再降档重发。
+ */
+export const MAX_TOKENS = 16000;
+export const RETRY_MAX_TOKENS = 64000;
+export const FALLBACK_MAX_TOKENS = 4000;
 export const JSON_ATTEMPTS = 2;
+
+/** 供应商按自己的模型上限拒绝 max_tokens 时的特征,用于降档重发。 */
+function isMaxTokensRejection(message: string): boolean {
+  return /HTTP 400/i.test(message) && /max_tokens|max_completion_tokens|maximum.*token|token.*limit/i.test(message);
+}
+
+/**
+ * fetch 抛错时把底层原因摊平成一行。undici 把 ECONNRESET / ENOTFOUND / 证书错误
+ * 全都包成一句 "fetch failed",不展开 cause 用户看到的报错等于没有信息。
+ */
+function networkDetail(e: unknown): string {
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let depth = 0; depth < 4 && cur instanceof Error; depth++) {
+    const code = (cur as NodeJS.ErrnoException).code;
+    const one = code ? `${cur.message} (${code})` : cur.message;
+    if (one && !parts.includes(one)) parts.push(one);
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return parts.length > 0 ? `底层原因 / cause: ${parts.join(" <- ")}` : "";
+}
 
 export function extraParams(baseUrl: string): Record<string, unknown> {
   return /pollinations\.ai/i.test(baseUrl) ? { reasoning_effort: "low" } : {};
@@ -195,11 +223,13 @@ export function unwrapLlmBody(text: string): string {
 }
 
 export interface ChatRequestOptions {
+  /** 省略则请求体里完全不带 temperature。思考型模型(以及 Anthropic 网关)只接受 temperature=1,带 0.2/0.6 会直接 HTTP 400。 */
   temperature?: number;
-  /** 结构化输出专用：正文为空时不拿 reasoning 顶替，直接抛 LlmReasoningOnlyError。 */
+  /** 结构化输出专用：确认模型只会吐思考过程后抛 LlmReasoningOnlyError，而不是拿思考当答案去解析。 */
   rejectReasoningFallback?: boolean;
 }
 
+/** 只保留给外部调用方参考;chatComplete 默认不带 temperature,交给供应商用自己的默认值。 */
 export const DEFAULT_CHAT_TEMPERATURE = 0.6;
 
 async function chatAttempt(
@@ -210,7 +240,7 @@ async function chatAttempt(
   maxTokens: number,
   budget: LlmRequestBudget,
   includeThinkingParam = true,
-  temperature = DEFAULT_CHAT_TEMPERATURE
+  temperature?: number
 ): Promise<ChatAttempt> {
   const url = `${llm.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   let res: Awaited<ReturnType<typeof requestLlmText>>;
@@ -227,7 +257,7 @@ async function chatAttempt(
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        temperature,
+        ...(temperature === undefined ? {} : { temperature }),
         max_tokens: maxTokens,
         ...extraParams(llm.baseUrl),
         ...(includeThinkingParam ? thinkingParams(llm.model) : {}),
@@ -239,7 +269,8 @@ async function chatAttempt(
     const hint = isLocalBaseUrl(llm.baseUrl)
       ? "本机 LLM 服务没有响应:若用 Ollama,请先到 ollama.com 安装并启动,再运行 ollama pull 拉取模型;或点「连接 AI 模型」换云端供应商,填 API Key 即用。/ Local LLM not responding: install & start Ollama (ollama.com) and pull the model, or switch to a cloud provider with an API key."
       : "请检查网络连接,并确认 Base URL 填写正确。/ Check your network and verify the Base URL.";
-    throw new Error(`无法连接 LLM 服务 / cannot reach LLM endpoint\n${hint}`);
+    // 带上 cause:底层是 ECONNRESET 还是 DNS 失败,不保留就永远查不出来。
+    throw new Error(`无法连接 LLM 服务 / cannot reach LLM endpoint\n${hint}\n${networkDetail(e)}`, { cause: e });
   }
   const text = res.text;
   if (!res.ok) {
@@ -259,30 +290,49 @@ async function chatAttempt(
 }
 
 export async function chatComplete(llm: LlmConfig, system: string, user: string, signal?: AbortSignal, options: ChatRequestOptions = {}): Promise<string> {
-  const temperature = options.temperature ?? DEFAULT_CHAT_TEMPERATURE;
+  const temperature = options.temperature;
   const budget = llmRequestBudget(isLocalBaseUrl(llm.baseUrl) ? LLM_LOCAL_TIMEOUT_MS : LLM_REMOTE_TIMEOUT_MS, 1);
   let includeThinkingParam = Object.keys(thinkingParams(llm.model)).length > 0;
+  let firstMaxTokens = MAX_TOKENS;
+  const attempt = (maxTokens: number): Promise<ChatAttempt> =>
+    chatAttempt(llm, system, user, signal, maxTokens, budget, includeThinkingParam, temperature);
   let first: ChatAttempt;
   try {
-    first = await chatAttempt(llm, system, user, signal, MAX_TOKENS, budget, includeThinkingParam, temperature);
+    first = await attempt(firstMaxTokens);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    if (!includeThinkingParam || !/HTTP 400/i.test(message) || !/thinking|unknown parameter|unsupported/i.test(message)) throw e;
-    includeThinkingParam = false;
-    first = await chatAttempt(llm, system, user, signal, MAX_TOKENS, budget, false, temperature);
+    // 供应商按自己的模型上限拒了 max_tokens：降档重发，别让预算上调反而打不通。
+    if (isMaxTokensRejection(message)) {
+      firstMaxTokens = FALLBACK_MAX_TOKENS;
+      first = await attempt(firstMaxTokens);
+    } else if (includeThinkingParam && /HTTP 400/i.test(message) && /thinking|unknown parameter|unsupported/i.test(message)) {
+      includeThinkingParam = false;
+      first = await attempt(firstMaxTokens);
+    } else {
+      throw e;
+    }
   }
   if (first.content) return first.content;
-  // 思考型模型的 reasoning 不是答案：结构化输出宁可报错换模型，也不要拿思考过程去解析。
-  if (options.rejectReasoningFallback && first.reasoning) throw new LlmReasoningOnlyError();
+  // finish_reason=length 表示思考把预算烧光了，正文还没开始写——这是预算问题不是模型问题，
+  // 必须先加大预算重发。在这里抛错等于把一次本来能成的调用判死刑。
+  if (options.rejectReasoningFallback && first.reasoning && first.finishReason !== "length") {
+    throw new LlmReasoningOnlyError();
+  }
   if (first.reasoning && first.finishReason !== "length") return first.reasoning;
   let retry: ChatAttempt | null = null;
   try {
-    retry = await chatAttempt(llm, system, user, signal, RETRY_MAX_TOKENS, budget, includeThinkingParam, temperature);
+    retry = await attempt(RETRY_MAX_TOKENS);
   } catch (e) {
     if (signal?.aborted) throw e;
     if (e instanceof LlmTransportError) throw e;
+    if (isMaxTokensRejection(e instanceof Error ? e.message : String(e))) {
+      try {
+        retry = await attempt(Math.max(firstMaxTokens, FALLBACK_MAX_TOKENS));
+      } catch { /* 降档也失败就走下面的统一提示。 */ }
+    }
   }
   if (retry?.content) return retry.content;
+  // 加大到 RETRY_MAX_TOKENS 仍然只有思考没有正文，才算实锤这个模型给不出结构化输出。
   if (options.rejectReasoningFallback && retry?.reasoning) throw new LlmReasoningOnlyError();
   if (retry?.reasoning && retry.finishReason !== "length") return retry.reasoning;
   const filtered = first.finishReason === "content_filter" || retry?.finishReason === "content_filter";

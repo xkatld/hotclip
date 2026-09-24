@@ -75,11 +75,28 @@ describe("detectEpisodes 智能分集走模型正文", () => {
     expect(result.episodes[1].reason).toBe("从概念转入实操");
   });
 
-  it("模型只吐思考不给正文时,直接报错让用户换模型,不静默回退等时", async () => {
+  it("模型每个窗口都只吐思考不给正文时,才报错让用户换模型", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "", reasoning_content: "让我先通读一遍逐句稿" } }],
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
     await expect(detectEpisodes(makeTranscript(), LLM, CONFIG)).rejects.toThrow("只返回了思考过程");
+  });
+
+  it("只有部分窗口吐不出正文时,拿其余窗口的断点继续,不打断整个任务", async () => {
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call++;
+      // 2 小时 → 3 个窗口;第一个窗口只有思考,后两个正常
+      if (call <= 2) {
+        return new Response(JSON.stringify({
+          choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "", reasoning_content: "想了半天" } }],
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return envelope('{"breaks":[{"segmentId":50,"timeSec":3000,"reason":"话题切换","chapterTitle":"第二章"}]}');
+    }));
+    const result = await detectEpisodes(makeTranscript(7200), LLM, CONFIG);
+    expect(result.episodes.length).toBeGreaterThan(0);
+    expect(result.fallbackReason).toContain("AI 调用失败");
   });
 
   it("模型明确说没有断点时,回退原因说明是内容连贯,不是解析失败", async () => {

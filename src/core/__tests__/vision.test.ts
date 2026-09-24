@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   planFrameTimes,
   parseSheetVerdicts,
+  parseEnergy,
   sanitizeVisibleText,
   sheetUserPrompt,
   visualPeakRanges,
@@ -112,6 +113,87 @@ describe("parseSheetVerdicts", () => {
     expect(parseSheetVerdicts('{"cells":"没有数组"}', 9)).toBeNull();
     expect(parseSheetVerdicts('{"cells":[{"i":1,"note":"没有分数"}]}', 9)).toBeNull();
     expect(parseSheetVerdicts("", 9)).toBeNull();
+  });
+});
+
+/**
+ * 下面这些正文是 2026-09-23 对 htai91 网关上 claude-sonnet-5 / glm-5.3-flash /
+ * kimi-k3 / deepseek-flash 实际调用抓回来的原样输出。
+ * 实测 28 次成功调用无一返回 JSON —— 全是 Markdown,表格与列表才是主路径。
+ */
+describe("parseSheetVerdicts 读真实模型输出", () => {
+  it("读多余打分列的表格,只取综合能量那一列", () => {
+    const content = `## 逐格爆点能量评估
+
+| 格 | 时刻 | 画面内容 | 视觉冲击 | 情绪张力 | 综合能量 | 性质 |
+|---|---|---|---|---|---|---|
+| 1 | 00:03 | 深色首屏,橙色 CTA | 5 | 6 | **5.5** | 承诺型钩子 |
+| 2 | 00:12 | 「选择转写引擎」表单列表 | 2.5 | 3 | **3.0** | 能量谷底 |
+| 7 | 00:57 | 爆炸粒子 + 手机矩阵 | 9 | 8.5 | **9.0** | 全片最高能 |`;
+    expect(parseSheetVerdicts(content, 9)).toEqual([
+      { i: 1, energy: 5.5, note: "深色首屏,橙色 CTA" },
+      { i: 2, energy: 3, note: "「选择转写引擎」表单列表" },
+      { i: 7, energy: 9, note: "爆炸粒子 + 手机矩阵" },
+    ]);
+  });
+
+  it("读星级加十分制混写的表格", () => {
+    const content = `| 格数 | 时刻 | 画面内容 | 能量值 | 评估说明 |
+|------|------|---------|--------|---------|
+| 1 | 00:03 | 上传长视频界面 | ★☆☆☆☆ (2/10) | 纯功能性UI |
+| 2 | 00:12 | 选择转写引擎设置 | ★★☆☆☆ (4) | 配置类界面 |
+| 3 | 00:21 | 数据分析图表 | **9.5 / 10** | 数据爆点 |`;
+    expect(parseSheetVerdicts(content, 9)).toEqual([
+      { i: 1, energy: 2, note: "上传长视频界面" },
+      { i: 2, energy: 4, note: "选择转写引擎设置" },
+      { i: 3, energy: 9.5, note: "数据分析图表" },
+    ]);
+  });
+
+  it("kimi-k3 用百分制写分数时折回十分制", () => {
+    const content = `| 格 | 时刻 | 画面内容 | 爆点能量 | 评估要点 |
+|---|---|---|---|---|
+| 1 | 00:03 | 上传页 | ★★★☆☆ (55) | 功能开场 |
+| 3 | 00:21 | 分析看板 | ★★★★☆ (70) | 首个视觉回报点 |`;
+    expect(parseSheetVerdicts(content, 9)).toEqual([
+      { i: 1, energy: 5.5, note: "上传页" },
+      { i: 3, energy: 7, note: "分析看板" },
+    ]);
+  });
+
+  it("deepseek-flash 写成分块列表时按格分块读,分数在下一行也能对上", () => {
+    const content = `基于您提供的 9 张画面截图,我为您逐格评估。
+
+**1. 00:03（第1格）**
+*   **画面内容**：深色背景的软件界面,中央一个橙色按钮。
+*   **爆点能量：低（⭐）**
+*   **分析**：典型的引导入口画面。
+
+**3. 00:21（第3格）**
+*   **画面内容**：波形分析图 + 92分评分面板。
+*   **爆点能量：中高（7/10）**
+*   **分析**：首个视觉回报点。`;
+    // 「画面内容:…92分评分面板」里的 92 不能被当成分数读成 9.2
+    expect(parseSheetVerdicts(content, 9)).toEqual([
+      { i: 1, energy: 1, note: "深色背景的软件界面,中央一个橙色按钮。" },
+      { i: 3, energy: 7, note: "波形分析图 + 92分评分面板。" },
+    ]);
+  });
+
+  it("超过百分制的数字判为读错,不夹成 10 顶成最高能帧", () => {
+    expect(parseEnergy("**250**")).toBeNull();
+    expect(parseEnergy("能量爆表")).toBeNull();
+    expect(parseEnergy("")).toBeNull();
+  });
+
+  it("认得实测见过的各种分数写法", () => {
+    expect(parseEnergy("2.5/10")).toBe(2.5);
+    expect(parseEnergy("⚡ 2.5/10")).toBe(2.5);
+    expect(parseEnergy("**3.0 / 10**")).toBe(3);
+    expect(parseEnergy("★★☆☆☆ (2)")).toBe(2);
+    expect(parseEnergy("⭐⭐")).toBe(2);
+    expect(parseEnergy("★★★☆☆")).toBe(6);
+    expect(parseEnergy("55/100")).toBe(5.5);
   });
 });
 

@@ -45,9 +45,14 @@ export function parseClock(text: string): number | null {
   return plain ? Number(plain[1]) : null;
 }
 
+/** 模型写句号的两种形状:提示词里的 [30],和它自己爱写的「第 30 句」。 */
 function parseSegmentId(text: string): number {
-  const match = text.match(/第\s*(\d+)\s*句/);
-  return match ? Number(match[1]) : 0;
+  const cn = text.match(/第\s*(\d+)\s*句/);
+  if (cn) return Number(cn[1]);
+  const bracket = text.match(/\[\s*(\d+)\s*\]/);
+  if (bracket) return Number(bracket[1]);
+  const bare = cleanCell(text).match(/^(\d+)$/);
+  return bare ? Number(bare[1]) : 0;
 }
 
 function sortBreaks(rows: RawBreak[]): RawBreak[] {
@@ -92,8 +97,39 @@ function isSeparatorRow(cells: string[]): boolean {
 
 const TIME_HEADER = /时间|time|timestamp/i;
 const REASON_HEADER = /说明|理由|依据|reason|why|note/i;
-const TITLE_HEADER = /标题|章节|chapter|title/i;
-const ID_HEADER = /位置|句号|句|segment|sentence/i;
+/** 实测模型的表头几乎不写「标题/章节」,写的是「切换内容」「切换到」「新话题」「进入话题」。 */
+const TITLE_HEADER = /标题|章节|切换内容|切换到|切换点|新话题|进入话题|主题|话题切换|chapter|title|topic/i;
+const ID_HEADER = /位置|句号|句编号|行号|序号|句|segment|sentence/i;
+
+/** 表里没有单独的理由列时,拿最长的那个文字单元格当理由:总比留空强。 */
+function widestTextCell(cells: string[], exclude: number[]): string {
+  let best = "";
+  for (let i = 0; i < cells.length; i++) {
+    if (exclude.includes(i)) continue;
+    if (parseClock(cells[i]) !== null) continue;
+    if (cells[i].length > best.length) best = cells[i];
+  }
+  return best.length >= 4 ? best : "";
+}
+
+/**
+ * 模型描述切换几乎都写成「从 A 切换到 B」「A → B」,整句当章节名又长又是在讲上一集。
+ * 有箭头就只取右边那一段;本来就是干净标题的原样返回;太长的返回空让上层回退。
+ */
+export function titleFromTransition(text: string): string {
+  const clean = cleanCell(text);
+  if (!clean) return "";
+  const parts = clean.split(/→|->|—>|切换到|转入|进入|变为/);
+  const picked = parts[parts.length - 1]
+    .replace(/\[\s*\d+\s*\]/g, "")
+    .replace(/第\s*\d+\s*句/g, "")
+    .trim()
+    .replace(/^[「『"“]+|[」』"”]+$/g, "")
+    .trim();
+  // 实测 glm 会把句号列当标题列写成「[50]」;纯数字/纯符号不是章节名,让上层回退。
+  if (!/[\p{L}\p{N}]/u.test(picked) || /^[\d\s.、)]+$/.test(picked)) return "";
+  return picked.length <= 24 ? picked : "";
+}
 
 /** 模型爱用 Markdown 表格回答,按表头定位列把行读成断点。 */
 export function breaksFromTable(body: string): RawBreak[] {
@@ -110,34 +146,44 @@ export function breaksFromTable(body: string): RawBreak[] {
       reasonCol = cells.findIndex((cell) => REASON_HEADER.test(cell));
       titleCol = cells.findIndex((cell) => TITLE_HEADER.test(cell));
       idCol = cells.findIndex((cell) => ID_HEADER.test(cell));
+      if (titleCol === reasonCol) titleCol = -1;
       continue;
     }
     const at = timeCol >= 0 ? timeCol : cells.findIndex((cell) => parseClock(cell) !== null);
     const timeSec = at >= 0 ? parseClock(cells[at]) : null;
     if (timeSec === null) continue;
-    const idCell = idCol >= 0 ? cells[idCol] : cells.find((cell) => /第\s*\d+\s*句/.test(cell)) ?? "";
+    const idCell = idCol >= 0 ? cells[idCol] : cells.find((cell) => /第\s*\d+\s*句|^\s*\[\s*\d+\s*\]\s*$/.test(cell)) ?? "";
+    const rawTitle = titleCol >= 0 ? cells[titleCol] : "";
+    const reason = reasonCol >= 0 ? cells[reasonCol] : widestTextCell(cells, [at, idCol, titleCol]);
     out.push({
       segmentId: parseSegmentId(idCell),
       timeSec,
-      reason: reasonCol >= 0 ? cells[reasonCol] : "",
-      chapterTitle: titleCol >= 0 ? cells[titleCol] : "",
+      reason,
+      chapterTitle: titleFromTransition(rawTitle) || titleFromTransition(reason),
     });
   }
   return sortBreaks(out);
 }
 
+/** 模型爱在列表末尾补一句「[18] 04:52 是结尾总结,不算切换点」——那是反例,不是断点。 */
+const NEGATED_LINE = /不算|不是|不属于|不视为|排除|除外|无需|忽略|not a |exclude/i;
+
 function breaksFromLooseText(body: string): RawBreak[] {
   const out: RawBreak[] = [];
   for (const line of body.split("\n")) {
     if (splitTableRow(line).length >= 2) continue;
+    if (NEGATED_LINE.test(line)) continue;
     const timeSec = parseClock(line);
     if (timeSec === null) continue;
     const reason = cleanCell(line)
       .replace(/\d{1,3}:\d{1,2}(?::\d{1,2})?/, "")
       .replace(/第\s*\d+\s*句[^\s,，。]*/g, "")
+      .replace(/^\s*\d+\s*[.、)]\s*/, "")
+      .replace(/\[\s*\d+\s*\]/g, "")
       .replace(/[\\/·—～~-]{1,}/g, " ")
+      .replace(/^[\s:：,，]+/, "")
       .trim();
-    out.push({ segmentId: parseSegmentId(line), timeSec, reason: reason.slice(0, 60), chapterTitle: "" });
+    out.push({ segmentId: parseSegmentId(line), timeSec, reason: reason.slice(0, 60), chapterTitle: titleFromTransition(reason) });
   }
   return sortBreaks(out);
 }

@@ -179,8 +179,8 @@ async function generateTitlesViaLlm(
     const reason = ep.reason ? `\n断点理由: ${ep.reason}` : "";
     return `${head}${reason}\n台词摘录: ${episodeSample(transcript.segments, ep)}`;
   });
+  // 不传 temperature:思考型模型只接受 temperature=1,带 0.3 会被直接 HTTP 400 拒掉。
   return chatCompleteJson(llm, zh ? TITLE_SYSTEM_ZH : TITLE_SYSTEM_EN, blocks.join("\n\n"), parseTitleRows, signal, {
-    temperature: 0.3,
     rejectReasoningFallback: true,
   });
 }

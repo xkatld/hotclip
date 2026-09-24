@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseBreaks, smartSplit, fixedSplit, manualSplit, snapToSentenceBoundary, formatEpisodeNumber, applyTitleTemplate, selectBreaksGlobal, enforceDuration, cleanReason, targetRange } from "../episode/split";
+import { parseBreaks, smartSplit, fixedSplit, manualSplit, snapToSentenceBoundary, formatEpisodeNumber, applyTitleTemplate, selectBreaksGlobal, enforceDuration, cleanReason, targetRange, titleFromTransition } from "../episode/split";
 import type { Transcript, EpisodeSplitConfig } from "../../shared/api-types";
 import { EPISODE_SPLIT_DEFAULTS } from "../../shared/api-types";
 
@@ -73,7 +73,8 @@ describe("parseBreaks", () => {
     expect(breaks[0].timeSec).toBe(193);
     expect(breaks[0].segmentId).toBe(34);
     expect(breaks[0].reason).toContain("KV 命名空间");
-    expect(breaks[0].chapterTitle).toBe("");
+    // 没有独立的章节列时,从「从 A 转入 B」的说明里摘出 B 当章节名
+    expect(breaks[0].chapterTitle).toBe("设置环境变量 / UUID / 登录访问");
     expect(breaks[1].timeSec).toBe(391);
     expect(breaks[1].segmentId).toBe(62);
   });
@@ -117,6 +118,90 @@ describe("parseBreaks", () => {
     const breaks = parseBreaks(raw);
     expect(breaks[0].timeSec).toBe(600);
     expect(breaks[1].timeSec).toBe(1200);
+  });
+});
+
+/**
+ * 下面这些正文是 2026-09-23 对 htai91 网关上 kimi-k3 / glm-5.3-flash /
+ * deepseek-flash / claude-sonnet-5 实际调用抓回来的原样输出。
+ * 实测 11 次成功调用无一返回 JSON,全是 Markdown —— 表格与列表才是主路径。
+ */
+describe("parseBreaks 读真实模型输出", () => {
+  it("读 kimi 的「切换说明」表:说明列里摘出章节名", () => {
+    const raw = [
+      "# 话题切换点分析",
+      "",
+      "| 切换位置 | 时间戳 | 切换说明 |",
+      "|---------|--------|---------|",
+      "| **[5]** | 01:10 | 基础部署 → 数据存储(KV) |",
+      "| **[10]** | 02:33 | 数据存储 → 环境变量与密钥配置 |",
+    ].join("\n");
+    const breaks = parseBreaks(raw);
+    expect(breaks).toHaveLength(2);
+    expect(breaks[0].timeSec).toBe(70);
+    expect(breaks[0].segmentId).toBe(5);
+    expect(breaks[0].chapterTitle).toBe("数据存储(KV)");
+    expect(breaks[1].segmentId).toBe(10);
+    expect(breaks[1].chapterTitle).toBe("环境变量与密钥配置");
+  });
+
+  it("读 deepseek 的「话题切换」表:表头不含「标题/章节」也能拿到章节名", () => {
+    const raw = [
+      "| 句号 | 时间戳 | 话题切换 |",
+      "|---|---|---|",
+      "| [30] | 04:30 | 从「注册和控制台入口」→「创建 hello world 服务并部署上线」 |",
+    ].join("\n");
+    const breaks = parseBreaks(raw);
+    expect(breaks).toHaveLength(1);
+    expect(breaks[0].segmentId).toBe(30);
+    expect(breaks[0].chapterTitle).toBe("创建 hello world 服务并部署上线");
+  });
+
+  it("读无序列表:方括号句号识别出来,编号不混进 reason", () => {
+    const raw = [
+      "这段内容中的话题切换点共有 2 处：",
+      "- [30] 04:30：从“注册和控制台入口”切换到“创建 hello world 服务并部署上线”",
+      "- [60] 09:00：从“创建 hello world 服务并部署上线”切换到“绑定 KV 命名空间”",
+    ].join("\n");
+    const breaks = parseBreaks(raw);
+    expect(breaks).toHaveLength(2);
+    expect(breaks[0].segmentId).toBe(30);
+    expect(breaks[0].chapterTitle).toBe("创建 hello world 服务并部署上线");
+    expect(breaks[0].reason.startsWith("从")).toBe(true);
+    expect(breaks[1].segmentId).toBe(60);
+  });
+
+  it("不把模型写的反例行当成断点", () => {
+    const raw = [
+      "1. **[5] 01:10** 从“基础部署”切换到“数据存储”",
+      "2. **[10] 02:33** 从“数据存储”切换到“环境变量配置”",
+      "说明：**[18] 04:52** 是结尾总结，不算新话题切换。",
+    ].join("\n");
+    const breaks = parseBreaks(raw);
+    expect(breaks.map((b) => b.timeSec)).toEqual([70, 153]);
+  });
+});
+
+describe("titleFromTransition", () => {
+  it("有箭头时只取右边那一段", () => {
+    expect(titleFromTransition("基础部署 → 数据存储(KV)")).toBe("数据存储(KV)");
+    expect(titleFromTransition("从「A 话题」切换到「B 话题」")).toBe("B 话题");
+    expect(titleFromTransition("从概念转入实操演示")).toBe("实操演示");
+  });
+
+  it("本来就是干净标题的原样返回", () => {
+    expect(titleFromTransition("环境变量配置")).toBe("环境变量配置");
+  });
+
+  it("摘出来还是太长就返回空,让上层回退", () => {
+    expect(titleFromTransition("话题".repeat(30))).toBe("");
+    expect(titleFromTransition("")).toBe("");
+  });
+
+  it("句号被误写进标题列时返回空,不让「[50]」变成章节名", () => {
+    expect(titleFromTransition("[50]")).toBe("");
+    expect(titleFromTransition("第 50 句")).toBe("");
+    expect(titleFromTransition("[50] 创建 hello world 服务")).toBe("创建 hello world 服务");
   });
 });
 

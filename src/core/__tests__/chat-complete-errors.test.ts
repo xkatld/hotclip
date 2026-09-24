@@ -3,7 +3,7 @@
  * 用户,只看到 fetch failed 是不知道下一步的——本地/云端要给不同的指引。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chatComplete, MAX_TOKENS, RETRY_MAX_TOKENS, thinkingParams } from "../llm-transport";
+import { chatComplete, MAX_TOKENS, RETRY_MAX_TOKENS, FALLBACK_MAX_TOKENS, thinkingParams } from "../llm-transport";
 
 const OLLAMA = { baseUrl: "http://localhost:11434/v1", apiKey: "", model: "qwen3:8b" };
 const CLOUD = { baseUrl: "https://api.atlascloud.ai/v1", apiKey: "sk-x", model: "qwen/qwen3.5-flash" };
@@ -165,6 +165,55 @@ describe("chatComplete 空响应处理(issue #8)", () => {
     vi.stubGlobal("fetch", fetchMock);
     await expect(chatComplete(CLOUD, "s", "u")).resolves.toBe('{"clips":[]}');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("默认不带 temperature:思考型模型只接受 1,带 0.2/0.6 会被直接 400 拒掉", async () => {
+    const fetchMock = vi.fn(async () => chatResponse({ content: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await chatComplete(CLOUD, "s", "u");
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, { body: string }])[1].body) as Record<string, unknown>;
+    expect("temperature" in body).toBe(false);
+  });
+
+  it("显式传了 temperature 才进请求体", async () => {
+    const fetchMock = vi.fn(async () => chatResponse({ content: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await chatComplete(CLOUD, "s", "u", undefined, { temperature: 1 });
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, { body: string }])[1].body) as Record<string, unknown>;
+    expect(body.temperature).toBe(1);
+  });
+
+  it("rejectReasoningFallback:finish=length 时先加大预算重试,不能当场判死刑", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(chatResponse({ content: "", reasoning_content: "思考烧光了预算" }, "length"))
+      .mockResolvedValueOnce(chatResponse({ content: '{"breaks":[]}' }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(chatComplete(CLOUD, "s", "u", undefined, { rejectReasoningFallback: true }))
+      .resolves.toBe('{"breaks":[]}');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejectReasoningFallback:加大预算后仍只有思考 → 才报换模型", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => chatResponse({ content: "", reasoning_content: "还是只有思考" }, "stop")));
+    const err = (await chatComplete(CLOUD, "s", "u", undefined, { rejectReasoningFallback: true }).catch((e: unknown) => e)) as Error;
+    expect(err.name).toBe("LlmReasoningOnlyError");
+    expect(err.message).toContain("加大输出预算重试后");
+  });
+
+  it("供应商按自己的上限拒掉 max_tokens → 降档重发而不是直接失败", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: "max_tokens is too large: 16000 > 8192" },
+      }), { status: 400 }))
+      .mockResolvedValueOnce(chatResponse({ content: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(chatComplete(CLOUD, "s", "u")).resolves.toBe("ok");
+    const budgets = fetchMock.mock.calls.map(
+      (c) => (JSON.parse((c as unknown as [string, { body: string }])[1].body) as { max_tokens: number }).max_tokens
+    );
+    expect(budgets).toEqual([MAX_TOKENS, FALLBACK_MAX_TOKENS]);
   });
 
   it("安全审查拦截(content_filter) → 提示换供应商或素材", async () => {

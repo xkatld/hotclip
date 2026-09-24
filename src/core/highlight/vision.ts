@@ -15,7 +15,7 @@ import { chunkCells, composeContactSheetJpeg } from "../contact-sheet";
 import type { AnalysisVideoOptions } from "../analysis-video";
 import type { MediaSignals, TimeRange } from "../signals";
 import { stripThinkBlocks } from "./prefilter";
-import { llmRequestBudget, modelErrorDetail, requestLlmText } from "../llm-transport";
+import { llmRequestBudget, LlmTransportError, modelErrorDetail, requestLlmText } from "../llm-transport";
 
 /** 全片抽帧上限——接触表批量研判后一次调用看九帧,27 帧=3 次调用。 */
 export const VISION_MAX_FRAMES = 27;
@@ -27,9 +27,22 @@ export const VISION_ENERGY_THRESHOLD = 7;
 export const VISION_PEAK_PAD_SEC = 3.5;
 /** 相邻高能时段间隔小于该值时并成一段。 */
 export const VISION_MERGE_GAP_SEC = 10;
-/** 单表研判超时;总预算见 budgetMs(默认 180s,超预算带着已得结果收工)。 */
-export const VISION_CALL_TIMEOUT_MS = 60_000;
-const VISION_BUDGET_MS = 180_000;
+/**
+ * 单表研判超时;总预算见 budgetMs(默认 180s,超预算带着已得结果收工)。
+ * 实测放开输出预算后 glm-5.3-flash 要 39.8s、deepseek-flash 24.9s,60s 卡在边界上。
+ */
+export const VISION_CALL_TIMEOUT_MS = 120_000;
+/**
+ * 单表输出预算。300 是拍脑袋定的,实测 4/4 模型全部 finish=length:
+ * kimi-k3 / deepseek-flash 光思考就烧掉 1000+ token,正文一个字吐不出来。
+ * 放开后实际用量 956~2246,8000 留足余量;max_tokens 只是上限、按实际生成计费。
+ */
+export const VISION_MAX_TOKENS = 8000;
+/**
+ * 快扫档总预算。实测单表 15~45s(思考型模型放开预算后必然变慢),27 帧 = 3 张表,
+ * 原来的 180s 在慢模型上刚好卡死在第 3 张,等于白抽最后九帧。
+ */
+const VISION_BUDGET_MS = 360_000;
 /** 成功研判帧数低于该值时证据太薄,宁可不给信号也不给噪声。 */
 const MIN_SCORED_FRAMES = 3;
 
@@ -172,12 +185,27 @@ export function planFrameTimes(
  * 解析接触表批量研判输出:{"cells":[{"i":1,"energy":0-10,"note":"…"}…]}。
  * 只收 1..cellCount 内的合法格(重复取首个,energy 夹回 0-10);
  * 一个合法格都没有(垃圾输出)返回 null。
+ *
+ * 实测(2026-09-23,htai91 网关上 claude-sonnet-5 / glm-5.3-flash / kimi-k3 /
+ * deepseek-flash 共 12 次调用)无一遵守"严格只输出 JSON",全是 Markdown 表格。
+ * 所以 JSON 之外必须有表格与松散行兜底,否则视觉信号一帧都进不来——而且上层
+ * 是 fail-open,失败时连错都不报。
  */
 export function parseSheetVerdicts(
   content: string,
   cellCount: number
 ): Array<{ i: number; energy: number; note: string; visibleText?: string[] }> | null {
   const cleaned = stripThinkBlocks(content);
+  return (
+    verdictsFromJson(cleaned, cellCount) ??
+    verdictsFromTable(cleaned, cellCount) ??
+    verdictsFromLooseText(cleaned, cellCount)
+  );
+}
+
+type SheetVerdict = { i: number; energy: number; note: string; visibleText?: string[] };
+
+function verdictsFromJson(cleaned: string, cellCount: number): SheetVerdict[] | null {
   const match = cleaned.match(/\{[\s\S]*\}/);
   if (!match) return null;
   let obj: unknown;
@@ -189,7 +217,7 @@ export function parseSheetVerdicts(
   const cells = (obj as { cells?: unknown }).cells;
   if (!Array.isArray(cells)) return null;
   const seen = new Set<number>();
-  const out: Array<{ i: number; energy: number; note: string; visibleText?: string[] }> = [];
+  const out: SheetVerdict[] = [];
   for (const c of cells) {
     const rec = c as { i?: unknown; energy?: unknown; note?: unknown; visibleText?: unknown };
     const i = Number(rec.i);
@@ -204,6 +232,142 @@ export function parseSheetVerdicts(
       note: typeof rec.note === "string" ? rec.note.trim().slice(0, 40) : "",
       ...(visibleText.length > 0 ? { visibleText } : {}),
     });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** 表格单元格清洗:去掉加粗星号、首尾空白与竖线残留。 */
+function cleanVisionCell(text: string): string {
+  return text.replace(/\*\*/g, "").replace(/^\s*\|?\s*|\s*\|?\s*$/g, "").trim();
+}
+
+/**
+ * 从模型写的能量单元格里取 0-10 的分。实测写法五花八门:
+ * 「2.5/10」「★☆☆☆☆ (2/10)」「★★☆☆☆ (2)」「⚡ 2.5/10」「**3.0 / 10**」「⭐⭐ 低」,
+ * kimi-k3 还会直接用百分制写「★★★☆☆ (55)」。
+ * 11-100 按百分制折回十分制(星级可交叉印证:3/5 星 ≈ 6 分,55/100 = 5.5 分);
+ * 100 以上一律判为读错,宁可返回 null 让这格作废,也不能夹成 10 —— 那会把一个
+ * 平淡画面直接顶成最高能帧。
+ */
+export function parseEnergy(text: string): number | null {
+  const s = cleanVisionCell(text);
+  if (!s) return null;
+  const toTen = (n: number): number | null => {
+    if (!Number.isFinite(n) || n < 0 || n > 100) return null;
+    return n <= 10 ? n : Math.round(n) / 10;
+  };
+  const outOf = /(\d+(?:\.\d+)?)\s*\/\s*(10|100)\b/.exec(s);
+  if (outOf) {
+    const n = Number(outOf[1]);
+    return outOf[2] === "10" ? (n >= 0 && n <= 10 ? n : null) : toTen(n);
+  }
+  const paren = /[(（]\s*(\d+(?:\.\d+)?)\s*[)）]/.exec(s);
+  if (paren) return toTen(Number(paren[1]));
+  const bare = /(?:^|[^\d.])(\d+(?:\.\d+)?)(?![\d.])/.exec(s);
+  if (bare) {
+    const n = toTen(Number(bare[1]));
+    if (n !== null) return n;
+  }
+  // 纯星级:数实心星,五星制折算成十分制。
+  const filled = (s.match(/[★⭐🌟]/gu) ?? []).length;
+  const hollow = (s.match(/[☆]/gu) ?? []).length;
+  if (filled > 0) {
+    const total = filled + hollow;
+    return total === 5 ? filled * 2 : filled <= 10 ? filled : null;
+  }
+  return null;
+}
+
+/** 一行按 Markdown 竖线切成单元格。 */
+function splitVisionRow(line: string): string[] {
+  if (!line.includes("|")) return [];
+  return line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(cleanVisionCell);
+}
+
+const IDX_HEADER = /^(格|格号|格数|序号|编号|cell|idx|index|#|no\.?)$/i;
+const ENERGY_HEADER = /能量|爆点|energy|评分|得分|分值/i;
+const NOTE_HEADER = /画面内容|画面|内容|描述|note|scene|content/i;
+const DESC_HEADER = /说明|评估|依据|理由|判断|reason|comment/i;
+
+function verdictsFromTable(body: string, cellCount: number): SheetVerdict[] | null {
+  let idxCol = -1;
+  let energyCol = -1;
+  let noteCol = -1;
+  let descCol = -1;
+  const seen = new Set<number>();
+  const out: SheetVerdict[] = [];
+  for (const line of body.split("\n")) {
+    const cells = splitVisionRow(line);
+    if (cells.length < 2) continue;
+    if (cells.every((c) => /^:?-{2,}:?$/.test(c) || c === "")) continue;
+    if (energyCol < 0) {
+      const idx = cells.findIndex((c) => IDX_HEADER.test(c));
+      const energy = cells.findIndex((c) => ENERGY_HEADER.test(c));
+      if (energy >= 0) {
+        idxCol = idx;
+        energyCol = energy;
+        noteCol = cells.findIndex((c) => NOTE_HEADER.test(c));
+        descCol = cells.findIndex((c, n) => n !== noteCol && DESC_HEADER.test(c));
+        continue;
+      }
+      continue;
+    }
+    const i = Number(cleanVisionCell(idxCol >= 0 ? cells[idxCol] ?? "" : cells[0] ?? ""));
+    if (!Number.isInteger(i) || i < 1 || i > cellCount || seen.has(i)) continue;
+    const energy = parseEnergy(cells[energyCol] ?? "");
+    if (energy === null) continue;
+    seen.add(i);
+    const note = cleanVisionCell(cells[noteCol >= 0 ? noteCol : descCol >= 0 ? descCol : -1] ?? "");
+    out.push({ i, energy, note: note.slice(0, 40) });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** 一格的起始行:「1.」「**1. 00:03(第1格)**」「- 第3格:」都算。 */
+const CELL_HEAD = /^\s*[*#>\-+\s]*(?:第\s*)?(\d{1,2})\s*[格号]?\s*[.、):：]/;
+/** 时钟会被当成分数读错,估分前先抹掉。 */
+const CLOCK = /\d{1,3}\s*:\s*\d{1,2}(?::\d{1,2})?/g;
+
+/**
+ * 最后一档:模型改用列表而不是表格时按格分块读。
+ * 实测 deepseek-flash 会把格号写在标题行、分数写在下一行的「爆点能量：低(⭐)」里,
+ * 所以不能按单行匹配,必须以格号行开块、在块内找分数。
+ */
+function verdictsFromLooseText(body: string, cellCount: number): SheetVerdict[] | null {
+  const blocks: Array<{ i: number; lines: string[] }> = [];
+  let cur: { i: number; lines: string[] } | null = null;
+  for (const raw of body.split("\n")) {
+    if (raw.includes("|")) continue;
+    const line = raw.replace(/\*\*/g, "").replace(/^\s*[*\-+]\s+/, "");
+    const head = CELL_HEAD.exec(line);
+    if (head) {
+      cur = { i: Number(head[1]), lines: [line.slice(head[0].length)] };
+      blocks.push(cur);
+      continue;
+    }
+    if (cur) cur.lines.push(line);
+  }
+  const seen = new Set<number>();
+  const out: SheetVerdict[] = [];
+  for (const block of blocks) {
+    if (!Number.isInteger(block.i) || block.i < 1 || block.i > cellCount || seen.has(block.i)) continue;
+    // 只认冒号「前面」是能量标签的行:「画面内容:波形图+92分评分面板」里的
+    // 「评分」在冒号后面,是描述不是分数,拿它估分会把 92 读成 9.2。
+    const energyLine = block.lines.find((l) => {
+      const label = l.split(/[:：]/)[0];
+      return label !== l && ENERGY_HEADER.test(label) && !NOTE_HEADER.test(label);
+    }) ?? block.lines.find((l) => ENERGY_HEADER.test(l) && !NOTE_HEADER.test(l));
+    const afterLabel = energyLine ? energyLine.replace(/^[^:：]*[:：]/, "") : block.lines.join(" ");
+    const energy = parseEnergy(afterLabel.replace(CLOCK, ""));
+    if (energy === null) continue;
+    seen.add(block.i);
+    const noteLine = block.lines.find((l) => NOTE_HEADER.test(l));
+    const note = cleanVisionCell(
+      (noteLine ? noteLine.replace(/^[^:：]*[:：]/, "") : block.lines.find((l) => l.trim().length >= 4) ?? "")
+        .replace(CLOCK, "")
+        .replace(/^[\s:：,，.、)(-]+/, "")
+    );
+    out.push({ i: block.i, energy, note: note.slice(0, 40) });
   }
   return out.length > 0 ? out : null;
 }
@@ -260,6 +424,7 @@ export function visionSystemPrompt(cellCount: number): string {
     "静态口播、空镜、PPT、普通对坐聊天给低分(0-3)。",
     "visibleText:只抄画面里清晰可逐字确认的标题/产品名/价格/比分/PPT要点;不确定、太小或只是根据语境猜到就给空数组,每格最多3条;",
     `严格只输出 JSON:{"cells":[{"i":1,"energy":0-10,"note":"≤15字画面描述","visibleText":["原样文字"]}…]},共 ${cellCount} 项,不要输出其他内容。`,
+    "实在要用表格,表头必须原样是这四列: 格 | 画面内容 | 能量 | 说明,能量写成 N/10 的数字,不要用星星。",
   ].join("\n");
 }
 
@@ -275,31 +440,54 @@ export function sheetUserPrompt(times: number[]): string {
 /** 默认研判实现:OpenAI 兼容多模态 chat(Ollama /v1 同样支持 image_url)。 */
 export const visionChatComplete: VisionChatFn = async (llm, system, userText, imageBase64Jpeg, signal) => {
   const url = `${llm.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const res = await requestLlmText(url, {
+  const body = JSON.stringify({
+    model: llm.model,
+    messages: [
+      { role: "system", content: system },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: userText },
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageBase64Jpeg}` } },
+        ],
+      },
+    ],
+    // 不传 temperature:这个网关是 Anthropic 后端且默认开思考,只接受 temperature=1,
+    // 带 0.2 会被直接 HTTP 400 拒掉(实测 glm-5.3-flash)。交给供应商用自己的默认值。
+    max_tokens: VISION_MAX_TOKENS,
+  });
+  const send = (): ReturnType<typeof requestLlmText> => requestLlmText(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
-    body: JSON.stringify({
-      model: llm.model,
-      messages: [
-        { role: "system", content: system },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: userText },
-            { type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageBase64Jpeg}` } },
-          ],
-        },
-      ],
-      temperature: 0.2,
-      max_tokens: 300,
-    }),
+    body,
   }, { signal, budget: llmRequestBudget(VISION_CALL_TIMEOUT_MS, 1) });
+
+  let res: Awaited<ReturnType<typeof requestLlmText>>;
+  try {
+    res = await send();
+  } catch (e) {
+    // 传图上行近百 KB,网关偶发掐连接(实测 12 次里丢 4 次,重发即通)。
+    // 这一层是 fail-open:不重发就等于整张接触表的九帧信号被静默丢掉。
+    signal?.throwIfAborted();
+    if (e instanceof LlmTransportError) throw e;
+    res = await send();
+  }
   const text = res.text;
   if (!res.ok) throw new Error(`vision HTTP ${res.status}: ${modelErrorDetail(text, llm.apiKey, 200)}`);
-  const data = JSON.parse(text) as { choices?: Array<{ message?: { content?: string } }> };
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error("vision empty response");
-  return content;
+  const data = JSON.parse(text) as {
+    choices?: Array<{ finish_reason?: string; message?: { content?: string; reasoning?: string; reasoning_content?: string } }>;
+  };
+  const choice = data.choices?.[0];
+  const content = choice?.message?.content?.trim();
+  if (content) return content;
+  // 正文空:要么预算被思考烧光(finish=length),要么网关把正文塞进了 reasoning。
+  const reasoning = (choice?.message?.reasoning_content ?? choice?.message?.reasoning ?? "").trim();
+  if (reasoning && choice?.finish_reason !== "length") return reasoning;
+  throw new Error(
+    choice?.finish_reason === "length"
+      ? `vision 输出预算耗尽(finish=length,上限 ${VISION_MAX_TOKENS}):该模型思考占满了预算,请换非思考版本的视觉模型。`
+      : "vision empty response"
+  );
 };
 
 /**

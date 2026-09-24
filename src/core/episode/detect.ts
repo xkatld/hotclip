@@ -65,8 +65,8 @@ async function detectWindow(
   signal?: AbortSignal
 ): Promise<RawBreak[]> {
   const userPrompt = buildWindowPrompt(segments, windowStart, windowEnd, totalDurationSec, zh);
+  // 不传 temperature:这一层的模型很多是思考型,只接受 temperature=1,带 0.2 会被直接 HTTP 400 拒掉。
   return chatCompleteJson(llm, systemPrompt, userPrompt, parseBreaks, signal, {
-    temperature: 0.2,
     rejectReasoningFallback: true,
   });
 }
@@ -144,6 +144,7 @@ export async function detectEpisodes(
 
   const allBreaks: RawBreak[] = [];
   const errors: string[] = [];
+  let reasoningOnly = 0;
 
   const settled = await runWithLimit(windows, WINDOW_CONCURRENCY, (w) =>
     detectWindow(llm, systemPrompt, w.segments, w.startSec, w.endSec, transcript.durationSec, zh, signal));
@@ -155,12 +156,15 @@ export async function detectEpisodes(
       continue;
     }
     signal?.throwIfAborted();
-    // 思考型模型换一个窗口也还是只吐思考,继续跑只是浪费额度,直接让用户换模型。
-    if (outcome.reason instanceof LlmReasoningOnlyError) throw outcome.reason;
+    if (outcome.reason instanceof LlmReasoningOnlyError) reasoningOnly++;
     const w = windows[i];
     const at = `${Math.round(w.startSec / 60)}-${Math.round(w.endSec / 60)} 分`;
     errors.push(`第 ${i + 1} 段 ${at}: ${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`);
   }
+
+  // 一个窗口吐不出正文不代表这个模型没救:别的窗口照样能给候选点。
+  // 只有全部窗口都栽在同一个原因上,才值得打断任务让用户换模型。
+  if (reasoningOnly === windows.length) throw new LlmReasoningOnlyError();
 
   if (errors.length === windows.length) {
     return fallback(`AI 调用失败,已按目标时长范围自动切割。原因: ${errors[0]}`);

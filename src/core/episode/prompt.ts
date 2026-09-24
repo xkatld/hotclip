@@ -34,8 +34,9 @@ export const EPISODE_SYSTEM_PROMPT_ZH = `你是专业视频分集编辑。给你
 4. chapterTitle 概括断点之后那一段的核心内容,不超过 20 字
 5. 按时间顺序列出全部断点,宁可多给也不要漏;每集多长不归你管,不要做时长取舍
 6. 不要强行凑数:整段就是一个连贯主题时输出 {"breaks":[]}
-7. 哪怕你觉得表格更清楚,也必须转换成上面的 JSON 输出
-8. 不要输出你的判断过程、不要写取舍理由、不要出现"建议""推荐""若""如果""符合""考虑到"这类推演词,只给结论`;
+7. 只列真正的断点,不要额外写"某某不算切换点"这类反例
+8. 不要输出你的判断过程、不要写取舍理由、不要出现"建议""推荐""若""如果""符合""考虑到"这类推演词,只给结论
+9. 实在要用表格,表头必须原样是这四列: 句号 | 时间 | 章节标题 | 说明`;
 
 export const EPISODE_SYSTEM_PROMPT_EN = `You are a professional video episode editor. Given a segment of a long video's transcript, find all natural "episode break" points within it.
 
@@ -57,8 +58,9 @@ Moments where the topic/chapter/subject naturally transitions. Typical signals:
 4. chapterTitle: concise title for the section AFTER the break, at most 10 words
 5. List every break in chronological order; err on the side of more. Episode length is not your concern — do not weigh durations
 6. Don't pad: if the segment is one continuous topic, output {"breaks":[]}
-7. Even if a table reads better to you, convert it into the JSON above
-8. Do not output your deliberation, trade-offs, or words like "suggest", "recommend", "if", "should", "fits" — conclusions only`;
+7. List real breaks only; never add counter-examples like "X is not a transition"
+8. Do not output your deliberation, trade-offs, or words like "suggest", "recommend", "if", "should", "fits" — conclusions only
+9. If you must use a table, the header must be exactly these four columns: sentence | time | chapter title | reason`;
 
 /**
  * 构建单个窗口的 user prompt。
